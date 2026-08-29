@@ -1,13 +1,28 @@
 use std::collections::HashMap;
 
-use fabric_core::Coordinate;
+use fabric_core::{Coordinate, Shard};
 use fabric_telemetry::Observation;
 
 use crate::profile::WorkloadProfile;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WorkloadKey {
+    pub shard_id: u64,
+    pub coordinate: Coordinate,
+}
+
+impl WorkloadKey {
+    pub fn new(shard_id: u64, coordinate: Coordinate) -> Self {
+        Self {
+            shard_id,
+            coordinate,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct WorkloadAnalyzer {
-    profiles: HashMap<Coordinate, WorkloadProfile>,
+    profiles: HashMap<WorkloadKey, WorkloadProfile>,
 }
 
 impl WorkloadAnalyzer {
@@ -18,20 +33,27 @@ impl WorkloadAnalyzer {
     }
 
     pub fn observe(&mut self, observation: &Observation) {
+        let key = WorkloadKey::new(
+            observation.shard.id,
+            observation.coordinate,
+        );
+
         let profile = WorkloadProfile::from_metrics(
             observation.coordinate,
             observation.metrics,
         );
 
-        self.profiles
-            .insert(observation.coordinate, profile);
+        self.profiles.insert(key, profile);
     }
 
     pub fn profile(
         &self,
+        shard: &Shard,
         coordinate: Coordinate,
     ) -> Option<&WorkloadProfile> {
-        self.profiles.get(&coordinate)
+        self.profiles.get(
+            &WorkloadKey::new(shard.id, coordinate)
+        )
     }
 
     pub fn hot_coordinates(&self) -> Vec<Coordinate> {
