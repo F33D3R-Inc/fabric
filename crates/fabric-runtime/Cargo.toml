@@ -1,0 +1,13 @@
+[package]
+name = "fabric-runtime"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fabric-core = { path = "../fabric-core" }
+fabric-ml = { path = "../fabric-ml" }
+fabric-optimizer = { path = "../fabric-optimizer" }
+fabric-protocol = { path = "../fabric-protocol" }
+fabric-telemetry = { path = "../fabric-telemetry" }
+fabric-topology = { path = "../fabric-topology" }
+fabric-workload = { path = "../fabric-workload" }

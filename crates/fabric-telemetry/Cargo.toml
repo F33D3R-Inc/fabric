@@ -1,0 +1,8 @@
+[package]
+name = "fabric-telemetry"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fabric-core = { path = "../fabric-core" }
+serde = { version = "1", features = ["derive"] }

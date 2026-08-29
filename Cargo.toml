@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+
+members = [
+    "crates/fabric-core",
+    "crates/fabric-telemetry",
+    "crates/fabric-topology",
+    "crates/fabric-workload",
+    "crates/fabric-ml",
+    "crates/fabric-optimizer",
+    "crates/fabric-protocol",
+    "crates/fabric-runtime",
+]

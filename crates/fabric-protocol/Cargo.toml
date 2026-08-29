@@ -1,0 +1,21 @@
+[package]
+name = "fabric-protocol"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fabric-core = { path = "../fabric-core" }
+fabric-telemetry = { path = "../fabric-telemetry" }
+fabric-topology = { path = "../fabric-topology" }
+fabric-workload = { path = "../fabric-workload" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dependencies.axum]
+version = "0.8"
+features = ["json"]
+
+[dependencies.tokio]
+version = "1"
+features = ["macros", "rt-multi-thread", "net"]
