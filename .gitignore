@@ -1,0 +1,120 @@
+# ================================
+# Facet Fabric - Git Ignore
+# ================================
+
+# ----------------
+# Rust / Cargo
+# ----------------
+target/
+**/target/
+
+# Rust incremental compilation
+**/target/debug/incremental/
+**/target/release/incremental/
+
+# Rust profiling / generated artifacts
+*.profraw
+*.profdata
+
+# ----------------
+# IDE / Editors
+# ----------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ----------------
+# OS
+# ----------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+Desktop.ini
+
+# ----------------
+# Environment / Secrets
+# ----------------
+.env
+.env.*
+!.env.example
+
+# Private keys / certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+
+# ----------------
+# Logs
+# ----------------
+*.log
+logs/
+
+# ----------------
+# Runtime state
+# ----------------
+run/
+runtime/
+data/
+state/
+tmp/
+temp/
+
+# Facet Fabric local node state
+fabric-data/
+fabric-state/
+fabric-runtime/
+
+# ----------------
+# Generated telemetry
+# ----------------
+telemetry/
+telemetry-data/
+*.telemetry
+*.telemetry.json
+
+# ----------------
+# Generated ML artifacts
+# ----------------
+models/
+model-cache/
+checkpoints/
+*.onnx
+*.safetensors
+*.bin
+
+# ----------------
+# Benchmarks / profiling
+# ----------------
+criterion/
+flamegraph.svg
+perf.data
+perf.data.old
+
+# ----------------
+# Coverage
+# ----------------
+coverage/
+lcov.info
+*.profraw
+
+# ----------------
+# Local simulation output
+# ----------------
+simulation/
+simulations/
+simulation-output/
+
+# ----------------
+# Temporary generated files
+# ----------------
+*.tmp
+*.temp
+*.bak
