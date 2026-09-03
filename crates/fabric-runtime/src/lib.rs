@@ -62,6 +62,10 @@ impl FabricRuntime {
         &self.analyzer
     }
 
+    pub fn optimizer(&self) -> &WorkloadOptimizer {
+        &self.optimizer
+    }
+
     pub fn observations(&self) -> &[Observation] {
         &self.observations
     }

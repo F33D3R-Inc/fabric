@@ -1,0 +1,21 @@
+[package]
+name = "fabric-cli"
+version = "0.1.0"
+edition = "2024"
+description = "Native operator CLI for Facet Fabric"
+
+[[bin]]
+name = "fabric"
+path = "src/main.rs"
+
+[dependencies]
+fabric-core = { path = "../fabric-core" }
+fabric-telemetry = { path = "../fabric-telemetry" }
+fabric-topology = { path = "../fabric-topology" }
+fabric-workload = { path = "../fabric-workload" }
+fabric-optimizer = { path = "../fabric-optimizer" }
+fabric-protocol = { path = "../fabric-protocol" }
+fabric-runtime = { path = "../fabric-runtime" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
