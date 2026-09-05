@@ -1,5 +1,5 @@
 use fabric_core::Coordinate;
-use fabric_telemetry::WorkloadMetrics;
+use fabric_telemetry::{CellWorkloadMetrics, WorkloadMetrics};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,8 +21,17 @@ impl PressureLevel {
     }
 }
 
+/// One cell's workload, named unambiguously.
+///
+/// `shard_id` and `coordinate` together are what make this a *cell* rather
+/// than a bare grid position: the same `(x, y)` coordinate exists in every
+/// shard, so a profile that named only the coordinate could not always say
+/// which cell it was describing. This mirrors how `fabric-controller`'s
+/// `ActionTarget` names an action's location -- `(shard_id, coordinate)` --
+/// rather than inventing a second vocabulary for the same idea.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkloadProfile {
+    pub shard_id: u64,
     pub coordinate: Coordinate,
 
     pub operations_per_second: f64,
@@ -41,12 +50,27 @@ pub struct WorkloadProfile {
 
     pub queue_depth: u64,
 
+    /// This cell's traffic, broken down by the source's own per-coordinate
+    /// attribution — see [`fabric_telemetry::CellWorkloadMetrics`]. Empty
+    /// when the source has no such breakdown to give. This is *not* a set
+    /// of Fabric grid cells: it is intra-instance detail the optimizer may
+    /// use to compare load within this one cell, not a list of additional
+    /// placeable locations.
+    pub cell_breakdown: Vec<CellWorkloadMetrics>,
+
+    /// Whether `cell_breakdown` is a known-partial account. See
+    /// [`fabric_telemetry::WorkloadMetrics::cell_breakdown_partial`]: `true`
+    /// means the source's own attribution table overflowed, so entries in
+    /// `cell_breakdown` must not be trusted as the whole story.
+    pub cell_breakdown_partial: bool,
+
     pub pressure_score: f64,
     pub pressure: PressureLevel,
 }
 
 impl WorkloadProfile {
     pub fn from_metrics(
+        shard_id: u64,
         coordinate: Coordinate,
         metrics: WorkloadMetrics,
     ) -> Self {
@@ -67,6 +91,7 @@ impl WorkloadProfile {
         let pressure_score = calculate_pressure(&metrics);
 
         Self {
+            shard_id,
             coordinate,
 
             operations_per_second: total,
@@ -84,6 +109,9 @@ impl WorkloadProfile {
             network_out_bytes_per_second: metrics.network_out_bytes_per_second,
 
             queue_depth: metrics.queue_depth,
+
+            cell_breakdown: metrics.cell_breakdown,
+            cell_breakdown_partial: metrics.cell_breakdown_partial,
 
             pressure_score,
             pressure: PressureLevel::from_score(pressure_score),

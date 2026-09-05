@@ -78,4 +78,20 @@ impl FabricState {
     ) -> impl Iterator<Item = &Observation> {
         self.latest.values()
     }
+
+    /// Everything most recently reported by one node.
+    ///
+    /// The map is keyed by node as well as location, so "how loaded is this
+    /// machine" is answerable without a second index -- which is what the
+    /// control plane's fleet view needs, and the only reason a bare
+    /// [`FabricState::observations`] was not enough.
+    pub fn for_node(
+        &self,
+        dbms_id: &DbmsId,
+    ) -> impl Iterator<Item = &Observation> {
+        self.latest
+            .iter()
+            .filter(move |(key, _)| &key.dbms_id == dbms_id)
+            .map(|(_, observation)| observation)
+    }
 }

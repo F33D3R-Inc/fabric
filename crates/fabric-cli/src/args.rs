@@ -38,6 +38,8 @@ pub enum Subcommand {
     Predict,
     /// Grid-bounds validation of ingested coordinates (`fabric-core::Coordinate`).
     Validate,
+    /// Fleet inventory and liveness (`fabric-runtime::NodeRegistry`).
+    Nodes,
 }
 
 impl Subcommand {
@@ -50,6 +52,7 @@ impl Subcommand {
             Self::Placement => "placement",
             Self::Predict => "predict",
             Self::Validate => "validate",
+            Self::Nodes => "nodes",
         }
     }
 
@@ -62,6 +65,7 @@ impl Subcommand {
             "placement" => Some(Self::Placement),
             "predict" => Some(Self::Predict),
             "validate" => Some(Self::Validate),
+            "nodes" => Some(Self::Nodes),
             _ => None,
         }
     }
@@ -78,6 +82,14 @@ pub struct RunOpts {
     pub json: bool,
     /// Show help for this subcommand and exit.
     pub help: bool,
+    /// `nodes`: the instant to judge liveness at, in epoch milliseconds.
+    /// Defaults to the runtime's own clock (the newest timestamp it ingested),
+    /// which is the only "now" that means anything when replaying a session.
+    pub now: Option<u64>,
+    /// `nodes`: how long a node may stay silent before it counts as
+    /// unreachable, in milliseconds. Defaults to
+    /// `fabric_runtime::DEFAULT_HEARTBEAT_DEADLINE_MS`.
+    pub deadline: Option<u64>,
 }
 
 /// Argument parsing failure. Maps to exit code 2 (usage error) at the top level.
@@ -87,6 +99,7 @@ pub enum ParseError {
     UnknownFlag(String),
     MissingValue(String),
     UnexpectedArgument(String),
+    InvalidValue { flag: String, value: String },
 }
 
 impl std::fmt::Display for ParseError {
@@ -96,6 +109,9 @@ impl std::fmt::Display for ParseError {
             Self::UnknownFlag(flag) => write!(f, "unknown flag '{flag}'"),
             Self::MissingValue(flag) => write!(f, "flag '{flag}' expects a value"),
             Self::UnexpectedArgument(a) => write!(f, "unexpected argument '{a}'"),
+            Self::InvalidValue { flag, value } => {
+                write!(f, "flag '{flag}' expects a number, got '{value}'")
+            }
         }
     }
 }
@@ -140,6 +156,14 @@ where
                 let value = &other["--input=".len()..];
                 opts.input = Some(PathBuf::from(value));
             }
+            "--now" => opts.now = Some(number(arg, iter.next())?),
+            other if other.starts_with("--now=") => {
+                opts.now = Some(parse_number(arg, &other["--now=".len()..])?);
+            }
+            "--deadline" => opts.deadline = Some(number(arg, iter.next())?),
+            other if other.starts_with("--deadline=") => {
+                opts.deadline = Some(parse_number(arg, &other["--deadline=".len()..])?);
+            }
             other if other.starts_with('-') => {
                 return Err(ParseError::UnknownFlag(other.to_string()));
             }
@@ -150,6 +174,19 @@ where
     }
 
     Ok(Command::Run { subcommand, opts })
+}
+
+/// A numeric flag value taken from the next argument.
+fn number(flag: &str, value: Option<&String>) -> Result<u64, ParseError> {
+    let value = value.ok_or_else(|| ParseError::MissingValue(flag.to_string()))?;
+    parse_number(flag, value)
+}
+
+fn parse_number(flag: &str, value: &str) -> Result<u64, ParseError> {
+    value.parse().map_err(|_| ParseError::InvalidValue {
+        flag: flag.to_string(),
+        value: value.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -196,6 +233,7 @@ mod tests {
             "placement",
             "predict",
             "validate",
+            "nodes",
         ] {
             match parse_ok(&[name]) {
                 Command::Run { subcommand, .. } => assert_eq!(subcommand.name(), name),
@@ -239,6 +277,34 @@ mod tests {
     fn subcommand_help() {
         let cmd = parse_ok(&["placement", "--help"]);
         assert!(matches!(cmd, Command::Run { opts, .. } if opts.help));
+    }
+
+    #[test]
+    fn liveness_flags_parse_in_both_forms() {
+        let a = parse_ok(&["nodes", "--now", "5000", "--deadline", "1000"]);
+        let b = parse_ok(&["nodes", "--now=5000", "--deadline=1000"]);
+        for cmd in [a, b] {
+            let Command::Run { subcommand, opts } = cmd else {
+                panic!("expected Run");
+            };
+            assert_eq!(subcommand, Subcommand::Nodes);
+            assert_eq!(opts.now, Some(5_000));
+            assert_eq!(opts.deadline, Some(1_000));
+        }
+    }
+
+    #[test]
+    fn a_non_numeric_liveness_flag_errors() {
+        let err = parse(["nodes".to_string(), "--now".to_string(), "soon".to_string()])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ParseError::InvalidValue {
+                flag: "--now".into(),
+                value: "soon".into()
+            }
+        );
+        assert!(err.to_string().contains("expects a number"));
     }
 
     #[test]

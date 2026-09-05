@@ -1,0 +1,46 @@
+[package]
+name = "fabric-facetql"
+version = "0.1.0"
+edition = "2024"
+description = "Fabric's client for the FacetQL wire contract: telemetry sampling and durable control state"
+
+[dependencies]
+fabric-core = { path = "../fabric-core" }
+fabric-protocol = { path = "../fabric-protocol" }
+fabric-routing = { path = "../fabric-routing" }
+fabric-runtime = { path = "../fabric-runtime" }
+fabric-telemetry = { path = "../fabric-telemetry" }
+fabric-topology = { path = "../fabric-topology" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Matches facetql's own client dependency exactly (rustls, no default
+# features, no `json` feature): one TLS stack across the stack, and bodies
+# are built and parsed with serde_json rather than reqwest's json helpers.
+# `stream` is here for exactly one caller: the front door's SSE fan-in, which
+# must forward `GET /events` frames as they arrive rather than buffering a
+# stream that never ends.
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "stream"] }
+
+# The front door is a server as well as a client. axum 0.8 is what
+# `fabric-protocol` already runs, so the workspace has one HTTP server stack.
+axum = { version = "0.8", features = ["json"] }
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+percent-encoding = "2"
+
+[dependencies.tokio]
+version = "1"
+features = ["macros", "rt-multi-thread", "time", "net", "sync"]
+
+[dev-dependencies]
+# The front-door integration test stands two real FacetQL-shaped servers up and
+# drives the real migration/replication state machines at the routing table.
+# `axum`, `futures-util` and `reqwest` come from [dependencies] above.
+fabric-migration = { path = "../fabric-migration" }
+fabric-replication = { path = "../fabric-replication" }
+
+[dev-dependencies.tokio]
+version = "1"
+features = ["macros", "rt-multi-thread", "time", "net", "sync"]

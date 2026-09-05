@@ -1,0 +1,38 @@
+[package]
+name = "fabric-daemon"
+version = "0.1.0"
+edition = "2024"
+description = "fabricd: the Fabric control plane as a running process, with the FacetQL front door on its data port"
+
+[[bin]]
+name = "fabricd"
+path = "src/main.rs"
+
+[dependencies]
+fabric-controller = { path = "../fabric-controller" }
+fabric-core = { path = "../fabric-core" }
+fabric-facetql = { path = "../fabric-facetql" }
+fabric-optimizer = { path = "../fabric-optimizer" }
+fabric-protocol = { path = "../fabric-protocol" }
+fabric-routing = { path = "../fabric-routing" }
+fabric-runtime = { path = "../fabric-runtime" }
+fabric-telemetry = { path = "../fabric-telemetry" }
+fabric-topology = { path = "../fabric-topology" }
+fabric-workload = { path = "../fabric-workload" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+axum = { version = "0.8", features = ["json"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# Same client stack as the rest of the workspace: rustls, no `json` feature.
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
+
+[dependencies.tokio]
+version = "1"
+features = ["macros", "rt", "rt-multi-thread", "time", "net", "sync", "signal"]
+
+[dev-dependencies]
+fabric-simulator = { path = "../fabric-simulator" }
+fabric-migration = { path = "../fabric-migration" }

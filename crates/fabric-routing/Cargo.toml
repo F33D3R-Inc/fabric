@@ -1,0 +1,11 @@
+[package]
+name = "fabric-routing"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fabric-core = { path = "../fabric-core" }
+fabric-migration = { path = "../fabric-migration" }
+fabric-replication = { path = "../fabric-replication" }
+fabric-topology = { path = "../fabric-topology" }
+serde = { version = "1", features = ["derive"] }

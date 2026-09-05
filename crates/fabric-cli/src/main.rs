@@ -17,8 +17,8 @@ use std::process::ExitCode;
 use args::{Command, RunOpts, Subcommand};
 use fabric_core::{GRID_ATOMS, GRID_HEIGHT, GRID_WIDTH};
 use fabric_protocol::ProtocolVersion;
-use fabric_runtime::FabricRuntime;
-use render::StatusSummary;
+use fabric_runtime::{FabricRuntime, DEFAULT_HEARTBEAT_DEADLINE_MS};
+use render::{NodeRow, StatusSummary};
 
 const EXIT_OK: u8 = 0;
 const EXIT_ERROR: u8 = 1;
@@ -41,10 +41,15 @@ COMMANDS:
     placement   Optimizer placement/optimization decisions
     predict     ML hotspot probability and anomaly score per profile
     validate    Check that ingested coordinates fall within the grid
+    nodes       Fleet inventory: registered nodes and their liveness
 
 OPTIONS:
     -i, --input <file>   JSON array of FabricMessage values to replay ('-' = stdin)
         --json           Emit JSON instead of human-readable text
+        --now <ms>       nodes: judge liveness at this epoch-millisecond instant
+                         (default: the newest timestamp the runtime ingested)
+        --deadline <ms>  nodes: silence budget before a node is unreachable
+                         (default: 30000)
     -h, --help           Show help
     -V, --version        Show version
 
@@ -62,6 +67,7 @@ fn subcommand_help(sub: Subcommand) -> String {
         Subcommand::Placement => "Run the optimizer over each workload profile and print the resulting placement decision.",
         Subcommand::Predict => "Score each workload profile with the optimizer's ML predictor: hotspot probability and anomaly score.",
         Subcommand::Validate => "Check every ingested coordinate against the grid bounds; exit 3 if any fall outside.",
+        Subcommand::Nodes => "List every node that registered with the runtime, with its region, heartbeat count and liveness verdict. A node that never reported in, or that missed its heartbeat deadline, is unreachable -- silence is never read as health.",
     };
     format!(
         "fabric {name} -- {purpose}\n\nUSAGE:\n    fabric {name} [--input <file>] [--json]\n",
@@ -111,6 +117,11 @@ fn run(subcommand: Subcommand, opts: RunOpts) -> ExitCode {
         Subcommand::Metrics => render::render_metrics(&metrics(&runtime), opts.json),
         Subcommand::Placement => render::render_placement(&placement(&runtime), opts.json),
         Subcommand::Predict => render::render_predict(&predictions(&runtime), opts.json),
+        Subcommand::Nodes => {
+            let now = opts.now.unwrap_or_else(|| runtime.clock_ms());
+            let deadline = opts.deadline.unwrap_or(DEFAULT_HEARTBEAT_DEADLINE_MS);
+            render::render_nodes(&nodes(&runtime, now, deadline), now, deadline, opts.json)
+        }
         Subcommand::Validate => {
             // A linter-style command: a clean run still exits 0, but any
             // out-of-grid coordinate is a finding that scripts can gate on.
@@ -188,6 +199,28 @@ fn predictions(runtime: &FabricRuntime) -> Vec<render::PredictionRow> {
         .collect();
     rows.sort_by_key(|r| r.coordinate.index());
     rows
+}
+
+/// The fleet inventory, judged at `now_ms`.
+///
+/// The registry already orders by `DbmsId`, so no sort is needed here -- and
+/// the health verdict is computed rather than stored, because it is only ever
+/// true of a particular instant.
+fn nodes(runtime: &FabricRuntime, now_ms: u64, deadline_ms: u64) -> Vec<NodeRow> {
+    runtime
+        .nodes()
+        .nodes()
+        .map(|node| NodeRow {
+            dbms_id: node.id.0.clone(),
+            region: node.region.clone(),
+            software_version: node.software_version.clone(),
+            registered_at_ms: node.registered_at_ms,
+            last_heartbeat_ms: node.last_heartbeat_ms,
+            silence_ms: node.silence_ms(now_ms),
+            heartbeats: node.heartbeats,
+            health: node.health(now_ms, deadline_ms).label(),
+        })
+        .collect()
 }
 
 fn validation(runtime: &FabricRuntime) -> Vec<render::ValidationIssue> {

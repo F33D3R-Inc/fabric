@@ -1,5 +1,21 @@
 [
   {
+    "RegisterNode": {
+      "protocol": "facet/1",
+      "node_id": "node-a",
+      "software_version": "0.13.0",
+      "region": "us-east"
+    }
+  },
+  {
+    "RegisterNode": {
+      "protocol": "facet/1",
+      "node_id": "node-b",
+      "software_version": "0.13.0",
+      "region": "us-west"
+    }
+  },
+  {
     "Topology": {
       "node_id": "node-a",
       "timestamp_ms": 1000,
@@ -15,6 +31,13 @@
           "region": "us-west"
         }
       ]
+    }
+  },
+  {
+    "Heartbeat": {
+      "node_id": "node-a",
+      "timestamp_ms": 1500,
+      "healthy": true
     }
   },
   {

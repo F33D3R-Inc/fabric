@@ -10,5 +10,12 @@ members = [
     "crates/fabric-optimizer",
     "crates/fabric-protocol",
     "crates/fabric-runtime",
+    "crates/fabric-facetql",
     "crates/fabric-cli",
+    "crates/fabric-daemon",
+    "crates/fabric-routing",
+    "crates/fabric-replication",
+    "crates/fabric-migration",
+    "crates/fabric-controller",
+    "crates/fabric-simulator",
 ]

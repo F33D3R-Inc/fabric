@@ -67,6 +67,17 @@ impl ProtocolServer {
             })
     }
 
+    /// Decode-and-acknowledge only. **This is not the authoritative message
+    /// handler** — [`fabric_runtime::FabricRuntime::handle`] is, and it is the
+    /// one that retains anything (node registry, topology, telemetry).
+    ///
+    /// This exists so the protocol crate can be exercised without depending on
+    /// the runtime (which depends on *it*, so the reverse edge would be a
+    /// cycle). It must stay stateless: making this retain fleet state would
+    /// give the unauthenticated `facet-protocol` listener a real inventory
+    /// that anything able to reach the port could write to. A stateful daemon
+    /// needs authenticated, signed control messages first (NOTES FAB-SEC-001)
+    /// — that is the root fix, not moving state in behind an open port.
     pub fn handle(
         &self,
         message: FabricMessage,

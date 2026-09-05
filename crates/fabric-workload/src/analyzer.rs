@@ -39,8 +39,9 @@ impl WorkloadAnalyzer {
         );
 
         let profile = WorkloadProfile::from_metrics(
+            observation.shard.id,
             observation.coordinate,
-            observation.metrics,
+            observation.metrics.clone(),
         );
 
         self.profiles.insert(key, profile);

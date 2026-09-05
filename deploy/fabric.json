@@ -1,0 +1,34 @@
+{
+  "data_listen": "0.0.0.0:7710",
+  "admin_listen": "0.0.0.0:7711",
+
+  "backends": [
+    {
+      "id": "facetql-a",
+      "url": "http://facetql-a:8080",
+      "region": "a",
+      "placements": [{ "shard": 1, "x": 0, "y": 0 }]
+    },
+    {
+      "id": "facetql-b",
+      "url": "http://facetql-b:8080",
+      "region": "b",
+      "placements": [{ "shard": 2, "x": 0, "y": 0 }]
+    }
+  ],
+
+  "keyspace": {
+    "rules": [],
+    "fallback": { "shard": 1, "x": 0, "y": 0 }
+  },
+
+  "cadence": {
+    "liveness_probe_ms": 5000,
+    "telemetry_poll_ms": 15000,
+    "control_cycle_ms": 5000
+  },
+
+  "silence_budget_ms": 15000,
+  "probe_timeout_ms": 2000,
+  "drain_ms": 30000
+}

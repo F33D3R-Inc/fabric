@@ -9,3 +9,8 @@ fabric-ml = { path = "../fabric-ml" }
 fabric-topology = { path = "../fabric-topology" }
 fabric-workload = { path = "../fabric-workload" }
 serde = { version = "1", features = ["derive"] }
+[dev-dependencies]
+# Only to build a real `WorkloadProfile` in tests through
+# `WorkloadProfile::from_metrics`, rather than hand-assembling one and having
+# to reproduce its pressure calculation here.
+fabric-telemetry = { path = "../fabric-telemetry" }

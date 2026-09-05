@@ -1,0 +1,12 @@
+[package]
+name = "fabric-controller"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fabric-core = { path = "../fabric-core" }
+fabric-optimizer = { path = "../fabric-optimizer" }
+fabric-telemetry = { path = "../fabric-telemetry" }
+fabric-topology = { path = "../fabric-topology" }
+fabric-workload = { path = "../fabric-workload" }
+serde = { version = "1", features = ["derive"] }

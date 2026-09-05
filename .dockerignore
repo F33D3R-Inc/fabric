@@ -1,0 +1,18 @@
+# The build context is the workspace's sources and its lockfile. Everything
+# below is either enormous (a debug target directory is gigabytes), or
+# host-specific, or a secret that must never be baked into an image layer.
+target/
+**/target/
+.git/
+.gitignore
+Dockerfile
+docker-compose.yml
+.dockerignore
+*.md
+docs/
+models/
+schemas/
+.env
+.env.*
+*.pem
+*.p12

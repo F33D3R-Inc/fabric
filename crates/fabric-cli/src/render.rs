@@ -36,6 +36,22 @@ pub struct PredictionRow {
     pub anomalous: bool,
 }
 
+/// One row of `fabric nodes`: a registered FacetQL instance and its liveness
+/// verdict. `health` is computed against an explicit instant rather than
+/// stored, because "is this node alive" is only ever a question about a
+/// particular moment.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct NodeRow {
+    pub dbms_id: String,
+    pub region: String,
+    pub software_version: String,
+    pub registered_at_ms: u64,
+    pub last_heartbeat_ms: Option<u64>,
+    pub silence_ms: Option<u64>,
+    pub heartbeats: u64,
+    pub health: &'static str,
+}
+
 /// One finding of `fabric validate`: a coordinate that fell outside the grid.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ValidationIssue {
@@ -226,6 +242,34 @@ pub fn render_predict(rows: &[PredictionRow], json: bool) -> String {
     out
 }
 
+pub fn render_nodes(rows: &[NodeRow], now_ms: u64, deadline_ms: u64, json: bool) -> String {
+    if json {
+        return serde_json::to_string_pretty(rows).unwrap_or_else(|_| "[]".to_string());
+    }
+
+    if rows.is_empty() {
+        return "No nodes. Nothing has registered with the runtime.".to_string();
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Nodes: {} registered (as of t={now_ms}ms, deadline {deadline_ms}ms)\n",
+        rows.len()
+    ));
+    out.push_str("  DBMS              REGION            VERSION   BEATS  SILENT       HEALTH\n");
+    for row in rows {
+        let silent = match row.silence_ms {
+            Some(ms) => format!("{ms}ms"),
+            None => "never".to_string(),
+        };
+        out.push_str(&format!(
+            "  {:<16}  {:<16}  {:<8}  {:>5}  {:<11}  {}\n",
+            row.dbms_id, row.region, row.software_version, row.heartbeats, silent, row.health
+        ));
+    }
+    out
+}
+
 pub fn render_validation(issues: &[ValidationIssue], json: bool) -> String {
     if json {
         return serde_json::to_string_pretty(issues)
@@ -344,6 +388,47 @@ mod tests {
         let json = render_validation(&issues, true);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed[0]["coordinate"]["y"], 20);
+    }
+
+    #[test]
+    fn nodes_empty_and_populated() {
+        assert!(render_nodes(&[], 0, 30_000, false).contains("No nodes"));
+
+        let rows = vec![
+            NodeRow {
+                dbms_id: "db-a".into(),
+                region: "us-east".into(),
+                software_version: "0.13.0".into(),
+                registered_at_ms: 0,
+                last_heartbeat_ms: Some(9_000),
+                silence_ms: Some(1_000),
+                heartbeats: 3,
+                health: "healthy",
+            },
+            NodeRow {
+                dbms_id: "db-b".into(),
+                region: "eu-west".into(),
+                software_version: "unknown".into(),
+                registered_at_ms: 0,
+                last_heartbeat_ms: None,
+                silence_ms: None,
+                heartbeats: 0,
+                health: "unreachable",
+            },
+        ];
+
+        let human = render_nodes(&rows, 10_000, 30_000, false);
+        assert!(human.contains("db-a"));
+        assert!(human.contains("healthy"));
+        // A node that never reported in says so, rather than showing 0ms of
+        // silence as if it had just checked in.
+        assert!(human.contains("never"));
+        assert!(human.contains("unreachable"));
+
+        let json = render_nodes(&rows, 10_000, 30_000, true);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed[0]["health"], "healthy");
+        assert_eq!(parsed[1]["last_heartbeat_ms"], serde_json::Value::Null);
     }
 
     #[test]

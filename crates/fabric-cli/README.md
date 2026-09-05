@@ -6,17 +6,17 @@ no async runtime) and links only the real Fabric crates.
 
 ## The "no live daemon yet" reality
 
-Fabric is early. There is **no persistent daemon and no live-state service**: the
-protocol server (`fabric-protocol`) acknowledges messages but does not retain
-queryable state. So this CLI deliberately does **not** pretend to connect to,
-manage, or query a running cluster.
+Fabric has a wire to FacetQL now (`fabric-facetql`: `GET /stats` polling, durable
+placements under `__fabric_placement`), but it still has **no persistent daemon**
+— the protocol server binary acknowledges messages without retaining state, and
+gaining an authenticated one is FAB-SEC-001 work. So this CLI deliberately does
+**not** pretend to connect to, manage, or query a running cluster.
 
 Instead it drives the *real* in-process analysis pipeline (`fabric-runtime`) over
 a **session** — a captured or authored file of protocol messages — and reports
 exactly what the actual Fabric crates compute from them. Every command is backed
 by a concrete, already-implemented crate capability. Capabilities Fabric does not
-have yet (node registry, heartbeat liveness, historical time-series) have **no
-command** — they are honestly absent, not faked.
+have yet have **no command** — they are honestly absent, not faked.
 
 With no session provided, the runtime is empty and every command reports the
 empty state truthfully.
@@ -31,6 +31,8 @@ fabric <command> [--input <file>] [--json]
 |--------|---------|
 | `-i`, `--input <file>` | JSON array of `FabricMessage` values to replay. `-` reads from **stdin**. |
 | `--json` | Emit machine-readable JSON instead of the human-readable table. |
+| `--now <ms>` | `nodes` only: the epoch-millisecond instant to judge liveness at. Defaults to the runtime's own clock — the newest timestamp it ingested. |
+| `--deadline <ms>` | `nodes` only: how long a node may stay silent before it counts as unreachable. Defaults to `30000`. |
 | `-h`, `--help` | Show help (top-level, or per-command after a command name). |
 | `-V`, `--version` | Show version. |
 
@@ -48,10 +50,27 @@ of the resulting state:
 | `placement` | `fabric-optimizer::WorkloadOptimizer` | The optimizer's placement decision per profile: action, gain, cost, score, confidence, execute flag. |
 | `predict` | `fabric-ml::WorkloadPredictor` (via the optimizer's own predictor) | Per profile: hotspot probability + likely-hot verdict, and anomaly score + anomalous verdict. |
 | `validate` | `fabric-core::Coordinate::is_valid` | Every ingested coordinate checked against the grid bounds; lists any that fall outside. |
+| `nodes` | `fabric-runtime::NodeRegistry` | The fleet inventory: every registered node with its region, software version, heartbeat count, time since its last heartbeat, and liveness verdict. |
 
 `predict` uses the *optimizer's own* predictor instance, so its numbers are
 exactly the ones the placement policy reacts to — not a separately-configured
 model.
+
+### Liveness, and what "now" means
+
+`nodes` reports `healthy`, `degraded` (the node's own last heartbeat said it was
+unwell) or `unreachable` (no heartbeat within the deadline, or none at all since
+registering). Three rules, all fail-closed:
+
+* a node that has just registered is **unreachable** — registration announces
+  intent, it is not evidence of life;
+* a node that re-registers (a restart) has to prove liveness again; and
+* silence is never rounded up to health.
+
+The clock is **message time**, not wall time: `--now` defaults to the newest
+timestamp the runtime ingested. Wall time would declare every node in a captured
+session dead, which says something about the capture and nothing about the fleet.
+Pass `--now` to ask the question at a different instant.
 
 ## Session file format
 
@@ -61,14 +80,11 @@ enum, so each element is a single-key object whose key is the variant name:
 
 | Variant | Effect on the runtime |
 |---------|-----------------------|
-| `RegisterNode` | Acknowledged only (no node registry exists yet — no queryable effect). |
-| `Heartbeat` | Acknowledged only (no liveness tracking yet). |
+| `RegisterNode` | Enters the node into the fleet inventory (drives `nodes`). |
+| `Heartbeat` | Records liveness against an existing registration (drives `nodes`). **Refused** for a node that never registered — heartbeats do not create inventory. |
 | `Topology` | Ingested into the topology registry (drives `topology`). |
 | `Telemetry` | Ingested into analyzer + state (drives `workload`, `metrics`, `placement`, `predict`). |
 | `Workload` | A lighter single-sample observation; ingested like telemetry. |
-
-`RegisterNode` and `Heartbeat` parse and are accepted, but have no queryable
-effect because Fabric has no node registry or liveness service yet.
 
 ### Example
 
@@ -76,6 +92,13 @@ A runnable example ships at [`examples/session.json`](examples/session.json):
 
 ```json
 [
+  {
+    "RegisterNode": {
+      "protocol": "facet/1", "node_id": "node-a",
+      "software_version": "0.13.0", "region": "us-east"
+    }
+  },
+  { "Heartbeat": { "node_id": "node-a", "timestamp_ms": 1500, "healthy": true } },
   {
     "Topology": {
       "node_id": "node-a",
@@ -110,6 +133,7 @@ Run it:
 
 ```sh
 fabric status   --input examples/session.json
+fabric nodes    --input examples/session.json
 fabric predict  --input examples/session.json --json
 cat examples/session.json | fabric placement --input -
 ```
@@ -128,9 +152,10 @@ cat examples/session.json | fabric placement --input -
 These would require Fabric capabilities that **do not exist yet**, so no command
 pretends to offer them:
 
-- **Live cluster / daemon queries** — there is no running daemon to talk to.
-- **Node inventory / heartbeat liveness** — `RegisterNode` and `Heartbeat` are
-  acknowledged but not retained; there is no registry to list.
+- **Live cluster / daemon queries** — there is no authenticated daemon to talk to.
+  The FacetQL wire (`fabric-facetql`) is async and this CLI is deliberately
+  synchronous and dependency-free, so polling a live fleet is a daemon's job, not
+  this tool's.
 - **Historical / time-series views** — `FabricState` keeps only the *latest*
   observation per location; there is no time-series store.
 - **Mutating operations** (apply a placement, move a coordinate) — the topology

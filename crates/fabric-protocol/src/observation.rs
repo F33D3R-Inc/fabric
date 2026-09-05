@@ -1,5 +1,5 @@
 use fabric_core::{Coordinate, DbmsId, Shard};
-use fabric_telemetry::WorkloadMetrics;
+use fabric_telemetry::{CellWorkloadMetrics, WorkloadMetrics};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +21,18 @@ pub struct TelemetrySample {
     pub cpu_utilization: f64,
     pub memory_utilization: f64,
     pub queue_depth: u64,
+
+    /// The source's own per-coordinate attribution of the traffic above.
+    /// Empty when the source reports none — an older sender, or a sender
+    /// with no such concept. `#[serde(default)]` so an older sender's
+    /// wire message (which predates this field) still deserializes.
+    #[serde(default)]
+    pub cell_breakdown: Vec<CellWorkloadMetrics>,
+
+    /// Whether `cell_breakdown` is known to be a partial account. See
+    /// [`fabric_telemetry::WorkloadMetrics::cell_breakdown_partial`].
+    #[serde(default)]
+    pub cell_breakdown_partial: bool,
 }
 
 impl TelemetrySample {
@@ -39,6 +51,8 @@ impl TelemetrySample {
             network_in_bytes_per_second: 0,
             network_out_bytes_per_second: 0,
             queue_depth: self.queue_depth,
+            cell_breakdown: self.cell_breakdown.clone(),
+            cell_breakdown_partial: self.cell_breakdown_partial,
         }
     }
 }

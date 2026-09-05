@@ -1,0 +1,126 @@
+# fabricd in front of two real FacetQL instances.
+#
+#   FABRIC_ADMIN_TOKEN=$(openssl rand -hex 32) docker compose up --build
+#
+# Then point an application at the front door instead of at a database:
+#
+#   FACET_DATABASE_URL=http://localhost:7710
+#
+# What this stack is, precisely: two real `facetql` processes and one `fabricd`
+# that speaks FacetQL's wire protocol on :7710, resolves every request through
+# its routing table, probes both instances with `GET /` on an interval, and
+# runs the control loop.
+#
+# The declared keyspace sends the whole namespace to one place — `facetql-a`
+# holds the cell every request routes to, and `facetql-b` is registered,
+# probed, and available as a destination. That is deliberately the shape of an
+# unsplit deployment, and it is what makes the front door adoptable before
+# anything has been split: because every rule and the fallback name one place,
+# the requests that have no truthful fleet-wide answer (`GET /stats`, a
+# kind-less `POST /nodes/query`, `POST /admin/users`) are still answered
+# exactly as one FacetQL would answer them.
+#
+# What it is not: a fleet whose workload Fabric can currently act on. The
+# control loop's pressure model reads CPU, memory, queue depth and latency, and
+# `GET /stats` reports none of them, so every cell observed through a live
+# FacetQL scores zero pressure and nothing is ever proposed. That is a missing
+# field on FacetQL's existing `/stats` response, not a workaround waiting to be
+# written here — see `crates/fabric-daemon/src/lib.rs`. The routing, the
+# liveness feed and the front door all work exactly as they will when it lands.
+#
+# The instances are declared here without a control-plane token, so fabricd
+# holds no credential for them at all. Give a backend a `token_env` in
+# fabric.json (and set that variable here) to enable `/stats` polling and the
+# durable placement store; the daemon refuses to start if a named variable is
+# missing, rather than running half-configured.
+
+services:
+  facetql-a:
+    build:
+      context: ../facetql
+      # facetql ships no Dockerfile, and this repo does not own that one to
+      # add. Building it inline keeps the whole stack inside this file and
+      # changes nothing in the engine's repository.
+      dockerfile_inline: |
+        # syntax=docker/dockerfile:1
+        FROM rust:1-slim-bookworm AS build
+        WORKDIR /src
+        RUN apt-get update \
+         && apt-get install -y --no-install-recommends pkg-config perl make \
+         && rm -rf /var/lib/apt/lists/*
+        COPY . .
+        RUN cargo build --release --locked --bin facetql
+        FROM debian:bookworm-slim
+        RUN apt-get update \
+         && apt-get install -y --no-install-recommends ca-certificates \
+         && rm -rf /var/lib/apt/lists/* \
+         && useradd --system --uid 65532 --create-home --home-dir /data facetql
+        COPY --from=build /src/target/release/facetql /usr/local/bin/facetql
+        USER facetql:facetql
+        ENV ENOCHIAN_DATA_DIR=/data
+        EXPOSE 8080
+        ENTRYPOINT ["/usr/local/bin/facetql"]
+        CMD ["start", "--port", "8080"]
+    environment:
+      ENOCHIAN_DATA_DIR: /data
+      FACETQL_ALLOW_PLAINTEXT: "1"
+    volumes:
+      - facetql-a-data:/data
+
+  facetql-b:
+    build:
+      context: ../facetql
+      dockerfile_inline: |
+        # syntax=docker/dockerfile:1
+        FROM rust:1-slim-bookworm AS build
+        WORKDIR /src
+        RUN apt-get update \
+         && apt-get install -y --no-install-recommends pkg-config perl make \
+         && rm -rf /var/lib/apt/lists/*
+        COPY . .
+        RUN cargo build --release --locked --bin facetql
+        FROM debian:bookworm-slim
+        RUN apt-get update \
+         && apt-get install -y --no-install-recommends ca-certificates \
+         && rm -rf /var/lib/apt/lists/* \
+         && useradd --system --uid 65532 --create-home --home-dir /data facetql
+        COPY --from=build /src/target/release/facetql /usr/local/bin/facetql
+        USER facetql:facetql
+        ENV ENOCHIAN_DATA_DIR=/data
+        EXPOSE 8080
+        ENTRYPOINT ["/usr/local/bin/facetql"]
+        CMD ["start", "--port", "8080"]
+    environment:
+      ENOCHIAN_DATA_DIR: /data
+      FACETQL_ALLOW_PLAINTEXT: "1"
+    volumes:
+      - facetql-b-data:/data
+
+  fabricd:
+    build: .
+    # No `condition: service_healthy` on the two instances above, and none is
+    # needed: an instance fabricd cannot reach is unreachable, routing declines
+    # to send traffic to it, and the next probe five seconds later finds it.
+    # Starting into a fleet that is still coming up is the ordinary case, not a
+    # race to be sequenced around.
+    depends_on:
+      - facetql-a
+      - facetql-b
+    environment:
+      # Required. The operator port is stateful — it accepts transfer reports
+      # and aborts — so it is never served unauthenticated, and the daemon
+      # refuses to start without this rather than binding an open one.
+      FABRIC_ADMIN_TOKEN: ${FABRIC_ADMIN_TOKEN:?set FABRIC_ADMIN_TOKEN, e.g. FABRIC_ADMIN_TOKEN=$(openssl rand -hex 32)}
+    volumes:
+      - ./deploy/fabric.json:/etc/fabric/fabric.json:ro
+    ports:
+      # The data port: FacetQL's wire protocol. This is what an application
+      # points FACET_DATABASE_URL at.
+      - "7710:7710"
+      # The operator port, published on loopback only. It reports the fleet's
+      # shape, which is not something to expose beyond the host.
+      - "127.0.0.1:7711:7711"
+
+volumes:
+  facetql-a-data:
+  facetql-b-data:

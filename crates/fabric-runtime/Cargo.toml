@@ -4,10 +4,18 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+fabric-controller = { path = "../fabric-controller" }
 fabric-core = { path = "../fabric-core" }
+fabric-migration = { path = "../fabric-migration" }
 fabric-ml = { path = "../fabric-ml" }
 fabric-optimizer = { path = "../fabric-optimizer" }
 fabric-protocol = { path = "../fabric-protocol" }
+fabric-replication = { path = "../fabric-replication" }
+fabric-routing = { path = "../fabric-routing" }
 fabric-telemetry = { path = "../fabric-telemetry" }
 fabric-topology = { path = "../fabric-topology" }
 fabric-workload = { path = "../fabric-workload" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+fabric-simulator = { path = "../fabric-simulator" }
