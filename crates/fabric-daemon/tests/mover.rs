@@ -263,6 +263,81 @@ fn binary() -> Option<PathBuf> {
     sibling.is_file().then_some(sibling)
 }
 
+/// Panics when `bin` is older than the newest `.rs` file under its engine's
+/// `src/` — the same false-positive this whole suite is built to catch one
+/// layer up, caught here instead of in the engine: `AGENT_LOG.md`'s
+/// 2026-09-06 audit found every "integration green" claim since 09-04 20:40
+/// had run against a `facetql` built before ten `src` files it should have
+/// exercised. `binary()` returning `None` means "not built, skip" — this is
+/// the opposite case, "built, but stale", and staleness must fail the test,
+/// not silently pass it or silently skip it.
+///
+/// Looks for `src/` three directories up from `target/{release,debug}/facetql`
+/// first, then falls back to the sibling checkout `../../../facetql/src`
+/// (relative to this crate's manifest dir) for a `FABRIC_FACETQL_BIN` that
+/// points somewhere else entirely. When neither exists — e.g. a CI artifact
+/// with no source tree beside it — there is nothing to compare against, so
+/// this does not fail: it cannot know.
+fn assert_binary_not_stale(bin: &std::path::Path) {
+    let candidates = [
+        bin.parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .map(|p| p.join("src")),
+        Some(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../facetql/src"),
+        ),
+    ];
+    let Some(src) = candidates.into_iter().flatten().find(|p| p.is_dir()) else {
+        return;
+    };
+
+    let bin_mtime = match std::fs::metadata(bin).and_then(|m| m.modified()) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in walkdir_rs_files(&src) {
+        if let Ok(mtime) = std::fs::metadata(&entry).and_then(|m| m.modified()) {
+            if newest.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true) {
+                newest = Some((mtime, entry));
+            }
+        }
+    }
+
+    if let Some((newest_mtime, newest_path)) = newest {
+        assert!(
+            newest_mtime <= bin_mtime,
+            "facetql binary {} is older than {} — rebuild it first: \
+             cd facetql && cargo build --release. An integration run against \
+             a stale engine is a false positive, not a pass.",
+            bin.display(),
+            newest_path.display(),
+        );
+    }
+}
+
+/// A minimal recursive `.rs` file walker — this test suite has no directory-
+/// walking dependency already in its `Cargo.toml`, and pulling one in for a
+/// single staleness check is a heavier fix than the check itself.
+fn walkdir_rs_files(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(walkdir_rs_files(&path));
+        } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
+            out.push(path);
+        }
+    }
+    out
+}
+
 /// `taskset`, if this host has it on `PATH`, or `None` when this test should
 /// skip the part of itself that needs to pin a process to one core.
 fn taskset() -> Option<PathBuf> {
@@ -421,6 +496,7 @@ async fn the_daemon_moves_a_cells_data_between_two_real_facetql_instances() {
         );
         return;
     };
+    assert_binary_not_stale(&binary);
 
     let source = Instance::start(&binary, "source").await;
     let destination = Instance::start(&binary, "destination").await;
@@ -669,6 +745,7 @@ async fn writes_landing_after_the_snapshot_still_reach_the_destination() {
         eprintln!("skipping: no facetql binary (see FABRIC_FACETQL_BIN)");
         return;
     };
+    assert_binary_not_stale(&binary);
 
     let source = Instance::start(&binary, "feed-source").await;
     let destination = Instance::start(&binary, "feed-destination").await;
@@ -824,6 +901,7 @@ async fn a_loaded_cell_crosses_the_pressure_threshold_from_real_facetql_stats() 
         );
         return;
     };
+    assert_binary_not_stale(&binary);
 
     let Some(taskset) = taskset() else {
         eprintln!("skipping: no `taskset` on PATH to pin the instance to one core");

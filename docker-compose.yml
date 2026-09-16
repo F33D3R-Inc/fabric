@@ -4,7 +4,10 @@
 #
 # Then point an application at the front door instead of at a database:
 #
-#   FACET_DATABASE_URL=http://localhost:7710
+#   FACET_DATABASE_URL=facetql://localhost:7710
+#
+# (facetql://, not http:// — fct's openStore in runtime/store.go only
+# recognizes the facetql:// and postgres:// schemes and rejects the rest.)
 #
 # What this stack is, precisely: two real `facetql` processes and one `fabricd`
 # that speaks FacetQL's wire protocol on :7710, resolves every request through
@@ -57,13 +60,32 @@ services:
          && useradd --system --uid 65532 --create-home --home-dir /data facetql
         COPY --from=build /src/target/release/facetql /usr/local/bin/facetql
         USER facetql:facetql
-        ENV ENOCHIAN_DATA_DIR=/data
+        ENV FACETQL_DATA_DIR=/data
         EXPOSE 8080
         ENTRYPOINT ["/usr/local/bin/facetql"]
         CMD ["start", "--port", "8080"]
     environment:
-      ENOCHIAN_DATA_DIR: /data
+      # Development posture: the two findings below are printed as
+      # warnings and the server starts, instead of the production
+      # refusal `main::enforce_deployment_posture` exits 7 with when
+      # they're missing and FACETQL_ENV isn't `development`.
+      FACETQL_ENV: development
+      FACETQL_DATA_DIR: /data
+      # Acknowledges plaintext HTTP inside the compose network — fabricd
+      # terminates the front door on :7710; these instances are never
+      # exposed directly.
       FACETQL_ALLOW_PLAINTEXT: "1"
+      # Bootstrap admin credential (auth::TOKENS_ENV) and at-rest key
+      # (crypto::MASTER_KEY_ENV). Neither is required to boot once
+      # FACETQL_ENV=development is set — auth.rs/crypto.rs fall back to
+      # the published dev token and an all-zero key instead — but real,
+      # per-instance values are set anyway so this compose stack isn't
+      # quietly running on credentials published in facetql's own
+      # source. Local/dev values only; generate real ones for anything
+      # that isn't this compose file with `openssl rand -hex 16` (token)
+      # and `openssl rand -hex 32` (key).
+      FACETQL_TOKENS: "ff683b09a458f70376f52d3e5edd121d:root:admin"
+      FACETQL_MASTER_KEY: "14d78f05ae9787b5f5176ff2c849e04c5fc116016129ae9857f5bc855a21e968"
     volumes:
       - facetql-a-data:/data
 
@@ -86,13 +108,20 @@ services:
          && useradd --system --uid 65532 --create-home --home-dir /data facetql
         COPY --from=build /src/target/release/facetql /usr/local/bin/facetql
         USER facetql:facetql
-        ENV ENOCHIAN_DATA_DIR=/data
+        ENV FACETQL_DATA_DIR=/data
         EXPOSE 8080
         ENTRYPOINT ["/usr/local/bin/facetql"]
         CMD ["start", "--port", "8080"]
     environment:
-      ENOCHIAN_DATA_DIR: /data
+      FACETQL_ENV: development
+      FACETQL_DATA_DIR: /data
       FACETQL_ALLOW_PLAINTEXT: "1"
+      # See facetql-a above for why these are set and what they are.
+      # Distinct token/key per instance — nothing requires them to
+      # match, and there's no reason to share a credential between two
+      # otherwise-independent data directories.
+      FACETQL_TOKENS: "e68f6f7d85a5e53620cb6b83f55140d7:root:admin"
+      FACETQL_MASTER_KEY: "a32ae917c4285d113836b4d72e3815dd95f64e2ebcd3629d48488970a3c6d44c"
     volumes:
       - facetql-b-data:/data
 
