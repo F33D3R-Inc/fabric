@@ -19,3 +19,10 @@ features = ["json"]
 [dependencies.tokio]
 version = "1"
 features = ["macros", "rt-multi-thread", "net"]
+
+[dev-dependencies]
+# Matches facetql's own client dependency (rustls, no default features): the
+# auth integration test drives a real bound server over real HTTP.
+# fabric-core/serde_json are already in [dependencies] above and so are
+# already available to this crate's tests without repeating them here.
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }

@@ -270,6 +270,7 @@ dependencies = [
  "fabric-telemetry",
  "fabric-topology",
  "fabric-workload",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

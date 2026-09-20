@@ -1,23 +1,6 @@
 use std::net::SocketAddr;
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    routing::post,
-    Json,
-    Router,
-};
-
-use fabric_protocol::{
-    FabricMessage,
-    FabricResponse,
-    ProtocolServer,
-};
-
-#[derive(Clone)]
-struct AppState {
-    protocol: ProtocolServer,
-}
+use fabric_protocol::{ProtocolAppState, ProtocolServer, PROTOCOL_TOKEN_ENV};
 
 #[tokio::main]
 async fn main() {
@@ -25,20 +8,28 @@ async fn main() {
         .parse()
         .expect("valid protocol address");
 
-    let protocol = ProtocolServer::new(address);
-
-    let state = AppState {
-        protocol: protocol.clone(),
+    // Fail closed, the same posture `fabric-daemon::config::Settings::resolve`
+    // already enforces for its own `FABRIC_ADMIN_TOKEN`: this listener
+    // accepts node registrations, heartbeats, topology and telemetry
+    // reports, so it is never served without a credential a caller must
+    // present.
+    let token = match std::env::var(PROTOCOL_TOKEN_ENV) {
+        Ok(token) if !token.is_empty() => token,
+        _ => {
+            eprintln!(
+                "facet-protocol: environment variable {PROTOCOL_TOKEN_ENV} is not set: \
+                 this listener accepts node registrations, heartbeats, topology and \
+                 telemetry reports, so it is never served unauthenticated"
+            );
+            std::process::exit(1);
+        }
     };
 
-    let app = Router::new()
-        .route("/v1/message", post(message))
-        .with_state(state);
+    let protocol = ProtocolServer::new(address);
+    let state = ProtocolAppState::new(protocol.clone(), token);
+    let app = fabric_protocol::router(state);
 
-    println!(
-        "Facet Protocol listening on {}",
-        protocol.address()
-    );
+    println!("Facet Protocol listening on {}", protocol.address());
 
     let listener = tokio::net::TcpListener::bind(address)
         .await
@@ -47,13 +38,4 @@ async fn main() {
     axum::serve(listener, app)
         .await
         .expect("protocol server");
-}
-
-async fn message(
-    State(state): State<AppState>,
-    Json(message): Json<FabricMessage>,
-) -> Result<Json<FabricResponse>, (StatusCode, String)> {
-    let response = state.protocol.handle(message);
-
-    Ok(Json(response))
 }

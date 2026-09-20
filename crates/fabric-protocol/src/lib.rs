@@ -27,6 +27,10 @@ pub use topology::{
 };
 
 pub use transport::{
+    authorized,
+    router,
+    ProtocolAppState,
     ProtocolError,
     ProtocolServer,
+    PROTOCOL_TOKEN_ENV,
 };
