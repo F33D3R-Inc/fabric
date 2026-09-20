@@ -5,17 +5,29 @@
 //! the actual thing: read `/stats`, write and read back a placement, and make
 //! the engine's native compare-and-set refuse a stale update.
 //!
-//! They are opt-in. Without `FABRIC_FACETQL_URL` and `FABRIC_FACETQL_TOKEN`
-//! each test returns immediately, so `cargo test` on a machine with no server
-//! passes — an integration test that silently becomes a no-op is worse than
-//! one that says it skipped, so each prints why.
+//! They are opt-in, via Rust's own `#[ignore]` mechanism rather than a
+//! home-grown "check an env var, print, return early" skip: `cargo test`
+//! only captures and shows a passing test's output when it fails, so the
+//! env-var-and-`eprintln!` skip this file used to do was invisible under a
+//! plain `cargo test` — it looked identical to "7 passed" whether or not
+//! anything actually ran against a server. `#[ignore]`'d tests are excluded
+//! from the default run but always counted in cargo's own summary line
+//! ("7 ignored"), so a developer or CI running `cargo test` with no server
+//! configured sees, unavoidably, that this file's real wire-contract
+//! verification did not run — the actual property the earlier comment here
+//! wanted ("an integration test that silently becomes a no-op is worse than
+//! one that says it skipped") but the eprintln-based version didn't reliably
+//! deliver. Running with `--ignored` now means "yes, actually verify
+//! against a live server," so a missing env var at that point is a real
+//! misconfiguration and `client()` panics with a clear message instead of
+//! skipping again.
 //!
 //! ```text
 //! rm -rf /tmp/fab && mkdir -p /tmp/fab
 //! ENOCHIAN_DATA_DIR=/tmp/fab ENOCHIAN_PORT=8892 ENOCHIAN_TOKENS="fabtok:fabric:admin" \
 //!   ./facetql/target/release/facetql start &
 //! FABRIC_FACETQL_URL=http://127.0.0.1:8892 FABRIC_FACETQL_TOKEN=fabtok \
-//!   cargo test -p fabric-facetql --test live -- --test-threads=1
+//!   cargo test -p fabric-facetql --test live -- --ignored --test-threads=1
 //! ```
 //!
 //! The token is admin because `GET /stats` is admin-gated.
@@ -29,31 +41,21 @@ use fabric_facetql::{
 use fabric_runtime::{FabricRuntime, NodeHealth, DEFAULT_HEARTBEAT_DEADLINE_MS};
 use fabric_topology::Placement;
 
-/// Build a client against the configured server, or `None` when the test
-/// should skip.
-fn client(id: &str) -> Option<FacetqlClient> {
-    let url = std::env::var("FABRIC_FACETQL_URL").ok()?;
-    let token = std::env::var("FABRIC_FACETQL_TOKEN").ok()?;
+/// Build a client against the configured server. Panics if the env vars
+/// are unset — every caller is an `#[ignore]`'d test, so reaching this at
+/// all already means the run was an explicit `--ignored` opt-in, not the
+/// default `cargo test` path; a missing var at that point is a
+/// misconfigured invocation, not a reason to skip quietly.
+fn client(id: &str) -> FacetqlClient {
+    let url = std::env::var("FABRIC_FACETQL_URL")
+        .expect("FABRIC_FACETQL_URL must be set to run an --ignored live test");
+    let token = std::env::var("FABRIC_FACETQL_TOKEN")
+        .expect("FABRIC_FACETQL_TOKEN must be set to run an --ignored live test");
 
     let endpoint = FacetqlEndpoint::new(DbmsId::new(id), url, token)
         .expect("a configured endpoint should be well-formed");
 
-    Some(FacetqlClient::new(endpoint))
-}
-
-macro_rules! server_or_skip {
-    ($id:expr) => {
-        match client($id) {
-            Some(client) => client,
-            None => {
-                eprintln!(
-                    "skipping: set FABRIC_FACETQL_URL and FABRIC_FACETQL_TOKEN to run \
-                     this against a live FacetQL"
-                );
-                return;
-            }
-        }
-    };
+    FacetqlClient::new(endpoint)
 }
 
 fn placement(shard_id: u64, dbms: &str, region: &str) -> Placement {
@@ -66,8 +68,9 @@ fn placement(shard_id: u64, dbms: &str, region: &str) -> Placement {
 }
 
 #[tokio::test]
+#[ignore = "requires a live FacetQL; set FABRIC_FACETQL_URL and FABRIC_FACETQL_TOKEN and run with --ignored"]
 async fn stats_reads_the_engines_own_counters() {
-    let client = server_or_skip!("db-live");
+    let client = client("db-live");
 
     let first = client.stats().await.expect("GET /stats");
     let second = client.stats().await.expect("GET /stats");
@@ -90,8 +93,9 @@ async fn stats_reads_the_engines_own_counters() {
 }
 
 #[tokio::test]
+#[ignore = "requires a live FacetQL; set FABRIC_FACETQL_URL and FABRIC_FACETQL_TOKEN and run with --ignored"]
 async fn a_placement_is_written_and_read_back() {
-    let client = server_or_skip!("db-live");
+    let client = client("db-live");
     let store = PlacementStore::new(client);
     let shard = 9_001;
 
@@ -131,8 +135,9 @@ async fn a_placement_is_written_and_read_back() {
 }
 
 #[tokio::test]
+#[ignore = "requires a live FacetQL; set FABRIC_FACETQL_URL and FABRIC_FACETQL_TOKEN and run with --ignored"]
 async fn a_stale_update_is_refused_by_the_engines_compare_and_set() {
-    let client = server_or_skip!("db-live");
+    let client = client("db-live");
     let store = PlacementStore::new(client);
     let shard = 9_002;
 
@@ -195,8 +200,9 @@ async fn a_stale_update_is_refused_by_the_engines_compare_and_set() {
 }
 
 #[tokio::test]
+#[ignore = "requires a live FacetQL; set FABRIC_FACETQL_URL and FABRIC_FACETQL_TOKEN and run with --ignored"]
 async fn polling_stats_drives_the_existing_optimizer_path() {
-    let client = server_or_skip!("db-live");
+    let client = client("db-live");
     let endpoint = client.endpoint().clone();
 
     let target = PollTarget::new(endpoint, 9_003, Coordinate::new(4, 5), "us-east");
@@ -257,14 +263,10 @@ async fn polling_stats_drives_the_existing_optimizer_path() {
 }
 
 #[tokio::test]
+#[ignore = "requires a live FacetQL; set FABRIC_FACETQL_URL and run with --ignored"]
 async fn a_bad_token_fails_closed_rather_than_reading_as_healthy() {
-    let url = match std::env::var("FABRIC_FACETQL_URL") {
-        Ok(url) => url,
-        Err(_) => {
-            eprintln!("skipping: FABRIC_FACETQL_URL not set");
-            return;
-        }
-    };
+    let url = std::env::var("FABRIC_FACETQL_URL")
+        .expect("FABRIC_FACETQL_URL must be set to run an --ignored live test");
 
     let endpoint = FacetqlEndpoint::new(DbmsId::new("db-badtoken"), url, "not-a-real-token")
         .expect("well-formed endpoint");
@@ -304,8 +306,9 @@ async fn a_bad_token_fails_closed_rather_than_reading_as_healthy() {
 /// writes, so this proves the client actually paginates the way the contract
 /// says to — a single 500-row page would pass a smaller test by accident.
 #[tokio::test]
+#[ignore = "requires a live FacetQL; set FABRIC_FACETQL_URL and FABRIC_FACETQL_TOKEN and run with --ignored"]
 async fn a_kind_larger_than_one_page_is_walked_by_cursor() {
-    let client = server_or_skip!("db-live");
+    let client = client("db-live");
     let store = PlacementStore::new(client.clone());
     let shard = 9_005;
 
@@ -351,8 +354,9 @@ async fn a_kind_larger_than_one_page_is_walked_by_cursor() {
 /// `POST /node/:address/claim` is the atomic claim primitive. Two claims of
 /// the same address must produce exactly one winner.
 #[tokio::test]
+#[ignore = "requires a live FacetQL; set FABRIC_FACETQL_URL and FABRIC_FACETQL_TOKEN and run with --ignored"]
 async fn claim_has_exactly_one_winner() {
-    let client = server_or_skip!("db-live");
+    let client = client("db-live");
     let store = PlacementStore::new(client.clone());
     let shard = 9_900;
 
