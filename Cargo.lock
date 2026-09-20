@@ -245,6 +245,7 @@ name = "fabric-ml"
 version = "0.1.0"
 dependencies = [
  "fabric-core",
+ "fabric-telemetry",
  "fabric-workload",
  "serde",
 ]

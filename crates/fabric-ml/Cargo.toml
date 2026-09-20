@@ -7,3 +7,6 @@ edition = "2024"
 fabric-core = { path = "../fabric-core" }
 fabric-workload = { path = "../fabric-workload" }
 serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+fabric-telemetry = { path = "../fabric-telemetry" }
