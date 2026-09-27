@@ -48,7 +48,7 @@ pub struct Daemon {
 impl Daemon {
     /// Bind, boot the control plane, and start serving.
     pub async fn start(
-        settings: Settings,
+        mut settings: Settings,
         telemetry: TelemetryFactory,
     ) -> Result<Self, DaemonError> {
         let data_listener = bind(settings.data_listen).await?;
@@ -65,6 +65,16 @@ impl Daemon {
                 address: settings.admin_listen,
                 error: error.to_string(),
             })?;
+
+        /*
+         * From here on the addresses are the ones the listeners hold, not the
+         * ones asked for: a port of 0 in the declaration is the kernel's to
+         * choose, and every status the control plane publishes must name the
+         * port it actually serves on, as the banner and this first snapshot
+         * do.
+         */
+        settings.data_listen = data_addr;
+        settings.admin_listen = admin_addr;
 
         let status = Arc::new(StatusHandle::new(starting(&settings, data_addr, admin_addr)));
 

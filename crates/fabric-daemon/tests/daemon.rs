@@ -615,3 +615,37 @@ async fn shutdown_rolls_back_an_action_that_has_not_cut_over() {
     source.stop().await;
     destination.stop().await;
 }
+
+/// A declaration may ask for port 0 on either port (this file's does). The
+/// status every cycle publishes must then name the ports the kernel chose,
+/// the same ones the banner prints (`Daemon::data_addr`/`admin_addr`) —
+/// not the `:0` the declaration asked for, long after the first cycle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_status_names_the_ports_actually_bound() {
+    let source = Fake::spawn().await;
+    let destination = Fake::spawn().await;
+
+    let daemon = Daemon::start(settings(&source, &destination, 5_000), simulated(false))
+        .await
+        .expect("the daemon boots");
+
+    let operator = daemon.admin_addr();
+    let http = reqwest::Client::new();
+
+    until!(
+        "a few control cycles",
+        Duration::from_secs(10),
+        admin(&http, operator, "/status").await["cycles"].as_u64().unwrap_or(0) >= 3
+    );
+
+    let status = admin(&http, operator, "/status").await;
+
+    assert_ne!(daemon.data_addr().port(), 0);
+    assert_ne!(daemon.admin_addr().port(), 0);
+    assert_eq!(status["data_listen"], daemon.data_addr().to_string());
+    assert_eq!(status["admin_listen"], daemon.admin_addr().to_string());
+
+    daemon.shutdown().await;
+    source.stop().await;
+    destination.stop().await;
+}
