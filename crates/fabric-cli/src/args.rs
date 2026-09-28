@@ -19,6 +19,35 @@ pub enum Command {
         subcommand: Subcommand,
         opts: RunOpts,
     },
+    /// `fabric daemon ...`: a running fabricd, over its operator port.
+    Daemon(DaemonCommand),
+}
+
+/// What to ask a running fabricd.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonOp {
+    /// `fabric daemon` alone, or with `--help`: the family's help.
+    Help,
+    /// `GET /status`.
+    Status,
+    /// `GET /placements`.
+    Placements,
+    /// `POST /actions`: move `(shard, x, y)` to `destination`.
+    Migrate {
+        shard: u64,
+        x: u8,
+        y: u8,
+        destination: String,
+    },
+}
+
+/// `fabric daemon <op> [--admin <url>] [--json]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonCommand {
+    pub op: DaemonOp,
+    /// The operator port (`--admin`); FABRIC_ADMIN_URL when absent.
+    pub admin: Option<String>,
+    pub json: bool,
 }
 
 /// Analysis subcommands, each backed by a real Fabric crate capability.
@@ -100,6 +129,8 @@ pub enum ParseError {
     MissingValue(String),
     UnexpectedArgument(String),
     InvalidValue { flag: String, value: String },
+    MissingArgument(String),
+    InvalidArgument { name: String, value: String },
 }
 
 impl std::fmt::Display for ParseError {
@@ -111,6 +142,10 @@ impl std::fmt::Display for ParseError {
             Self::UnexpectedArgument(a) => write!(f, "unexpected argument '{a}'"),
             Self::InvalidValue { flag, value } => {
                 write!(f, "flag '{flag}' expects a number, got '{value}'")
+            }
+            Self::MissingArgument(name) => write!(f, "missing argument {name}"),
+            Self::InvalidArgument { name, value } => {
+                write!(f, "argument {name} expects a number, got '{value}'")
             }
         }
     }
@@ -135,6 +170,10 @@ where
         "-h" | "--help" | "help" => return Ok(Command::Help),
         "-V" | "--version" | "version" => return Ok(Command::Version),
         _ => {}
+    }
+
+    if first == "daemon" {
+        return parse_daemon(&args[1..]).map(Command::Daemon);
     }
 
     let subcommand = Subcommand::parse(first)
@@ -174,6 +213,89 @@ where
     }
 
     Ok(Command::Run { subcommand, opts })
+}
+
+/// `fabric daemon <status|placements|migrate ...> [--admin <url>] [--json]`.
+fn parse_daemon(args: &[String]) -> Result<DaemonCommand, ParseError> {
+    let mut command = DaemonCommand {
+        op: DaemonOp::Help,
+        admin: None,
+        json: false,
+    };
+    let mut name: Option<String> = None;
+    let mut positional: Vec<String> = Vec::new();
+    let mut help = false;
+    let mut iter = args.iter();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "-h" | "--help" => help = true,
+            "--json" => command.json = true,
+            "--admin" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| ParseError::MissingValue(arg.clone()))?;
+                command.admin = Some(value.clone());
+            }
+            other if other.starts_with("--admin=") => {
+                command.admin = Some(other["--admin=".len()..].to_string());
+            }
+            other if other.starts_with('-') && other.len() > 1 => {
+                return Err(ParseError::UnknownFlag(other.to_string()));
+            }
+            other if name.is_none() => name = Some(other.to_string()),
+            other => positional.push(other.to_string()),
+        }
+    }
+
+    if help {
+        return Ok(command);
+    }
+
+    let Some(name) = name else {
+        return Ok(command);
+    };
+
+    command.op = match name.as_str() {
+        "status" | "placements" => {
+            if let Some(extra) = positional.first() {
+                return Err(ParseError::UnexpectedArgument(extra.clone()));
+            }
+            if name == "status" {
+                DaemonOp::Status
+            } else {
+                DaemonOp::Placements
+            }
+        }
+        "migrate" => {
+            let names = ["<shard>", "<x>", "<y>", "<destination>"];
+            if let Some(missing) = names.get(positional.len()) {
+                return Err(ParseError::MissingArgument(missing.to_string()));
+            }
+            if let Some(extra) = positional.get(names.len()) {
+                return Err(ParseError::UnexpectedArgument(extra.clone()));
+            }
+            let invalid = |name: &str, value: &str| ParseError::InvalidArgument {
+                name: name.to_string(),
+                value: value.to_string(),
+            };
+            DaemonOp::Migrate {
+                shard: positional[0]
+                    .parse()
+                    .map_err(|_| invalid("<shard>", &positional[0]))?,
+                x: positional[1]
+                    .parse()
+                    .map_err(|_| invalid("<x>", &positional[1]))?,
+                y: positional[2]
+                    .parse()
+                    .map_err(|_| invalid("<y>", &positional[2]))?,
+                destination: positional[3].clone(),
+            }
+        }
+        other => return Err(ParseError::UnknownCommand(format!("daemon {other}"))),
+    };
+
+    Ok(command)
 }
 
 /// A numeric flag value taken from the next argument.
@@ -329,5 +451,72 @@ mod tests {
     fn unexpected_positional_errors() {
         let err = parse(["status".to_string(), "extra".to_string()]).unwrap_err();
         assert_eq!(err, ParseError::UnexpectedArgument("extra".into()));
+    }
+
+    fn daemon(args: &[&str]) -> Result<DaemonCommand, ParseError> {
+        match parse(args.iter().map(|s| s.to_string()))? {
+            Command::Daemon(command) => Ok(command),
+            other => panic!("not a daemon command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_commands_parse() {
+        assert_eq!(daemon(&["daemon"]).unwrap().op, DaemonOp::Help);
+        assert_eq!(daemon(&["daemon", "status", "--help"]).unwrap().op, DaemonOp::Help);
+
+        let status = daemon(&["daemon", "status", "--admin", "http://127.0.0.1:7071", "--json"]).unwrap();
+        assert_eq!(status.op, DaemonOp::Status);
+        assert_eq!(status.admin.as_deref(), Some("http://127.0.0.1:7071"));
+        assert!(status.json);
+
+        let placements = daemon(&["daemon", "placements", "--admin=http://h:1"]).unwrap();
+        assert_eq!(placements.op, DaemonOp::Placements);
+        assert_eq!(placements.admin.as_deref(), Some("http://h:1"));
+
+        assert_eq!(
+            daemon(&["daemon", "migrate", "1", "0", "2", "us-west-db-0"]).unwrap().op,
+            DaemonOp::Migrate {
+                shard: 1,
+                x: 0,
+                y: 2,
+                destination: "us-west-db-0".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn daemon_commands_refuse_what_they_cannot_mean() {
+        assert_eq!(
+            daemon(&["daemon", "restart"]).unwrap_err(),
+            ParseError::UnknownCommand("daemon restart".to_string())
+        );
+        assert_eq!(
+            daemon(&["daemon", "migrate", "1", "0"]).unwrap_err(),
+            ParseError::MissingArgument("<y>".to_string())
+        );
+        assert_eq!(
+            daemon(&["daemon", "migrate", "1", "0", "300", "d"]).unwrap_err(),
+            ParseError::InvalidArgument {
+                name: "<y>".to_string(),
+                value: "300".to_string(),
+            }
+        );
+        assert_eq!(
+            daemon(&["daemon", "migrate", "1", "0", "0", "d", "e"]).unwrap_err(),
+            ParseError::UnexpectedArgument("e".to_string())
+        );
+        assert_eq!(
+            daemon(&["daemon", "status", "now"]).unwrap_err(),
+            ParseError::UnexpectedArgument("now".to_string())
+        );
+        assert_eq!(
+            daemon(&["daemon", "status", "--admin"]).unwrap_err(),
+            ParseError::MissingValue("--admin".to_string())
+        );
+        assert_eq!(
+            daemon(&["daemon", "status", "--token", "x"]).unwrap_err(),
+            ParseError::UnknownFlag("--token".to_string())
+        );
     }
 }

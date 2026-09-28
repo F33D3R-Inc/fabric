@@ -607,6 +607,24 @@ impl Settings {
             )));
         }
 
+        /*
+         * A probe that may take as long as the silence budget can never keep
+         * an instance alive: the heartbeat it files is stamped when the sweep
+         * began, so by the time a slow answer lands the instance is already
+         * past its budget, and a merely slow instance reads as a dead one.
+         * The prober relies on this (see `liveness.rs`); here it is enforced.
+         */
+        let probe_timeout_ms = file.probe_timeout_ms.max(1);
+
+        if probe_timeout_ms >= silence_budget_ms {
+            return Err(invalid(format!(
+                "probe_timeout_ms ({probe_timeout_ms}) is not shorter than \
+                 silence_budget_ms ({silence_budget_ms}): an instance that \
+                 answers its probe only at the timeout would already be \
+                 declared unreachable"
+            )));
+        }
+
         let front_door = FrontDoorConfig {
             read_preference: file
                 .read_preference
@@ -627,7 +645,7 @@ impl Settings {
             cadence,
             policy: file.policy.resolve(),
             silence_budget_ms,
-            probe_timeout_ms: file.probe_timeout_ms.max(1),
+            probe_timeout_ms,
             placement_capacity: file.placement_capacity.max(1),
             placement_store,
             drain_ms: file.drain_ms,
@@ -935,6 +953,29 @@ mod tests {
         );
 
         assert!(message.contains("between probes"), "{message}");
+    }
+
+    /// liveness.rs requires the probe timeout to be shorter than the silence
+    /// budget; a declaration that breaks it is refused, not run.
+    #[test]
+    fn a_probe_timeout_not_shorter_than_the_silence_budget_is_refused() {
+        let message = refusal(
+            r#"{
+                "backends": [
+                    { "id": "db-a", "url": "http://a:1",
+                      "placements": [{ "shard": 1, "x": 0, "y": 0 }] }
+                ],
+                "keyspace": { "fallback": { "shard": 1, "x": 0, "y": 0 } },
+                "cadence": { "liveness_probe_ms": 1000 },
+                "silence_budget_ms": 3000,
+                "probe_timeout_ms": 3000
+            }"#,
+        );
+
+        assert!(
+            message.contains("probe_timeout_ms (3000) is not shorter than silence_budget_ms (3000)"),
+            "{message}"
+        );
     }
 
     /// A misspelled key that is silently ignored is a setting an operator

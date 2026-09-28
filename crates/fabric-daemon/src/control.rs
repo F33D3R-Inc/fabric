@@ -22,6 +22,20 @@
 //! runtime, and everything it needs from the outside world — probes, `/stats`
 //! samples — is awaited *on that thread*.
 //!
+//! # Liveness is never waiting on telemetry
+//!
+//! The two feeds run on this thread but not in one sequence. Probes belong
+//! to the cycle, on their own cadence and their own short timeout; `/stats`
+//! is sampled by a pump beside the cycle, and a finished sample is applied
+//! the moment it arrives. They were once one sequence -- probe, then poll,
+//! then decide -- and that made a slow `/stats` a lost node: the heartbeats
+//! were stamped at the probe, the sample moved the runtime's clock to the
+//! wall time it came back at, and liveness was judged at that clock, so one
+//! read slower than the silence budget made every instance that had just
+//! answered its probe look silent past it, and held every probe back while
+//! it lasted. A sample can only carry the clock to a time the probes have
+//! kept pace with when the probes never wait for it.
+//!
 //! This is not a workaround; it is the shape that makes the lock discipline
 //! below possible. The control plane's state is not shared, so it needs no
 //! lock at all, and the data path can never block on it.
@@ -72,7 +86,7 @@ use crate::status::{
     MigrationStatus, MoverStatus, PlacementStatus, RefusedCopy, Status, StatusHandle,
     StoreStatus,
 };
-use crate::telemetry::TelemetrySource;
+use crate::telemetry::{Sample, TelemetrySource};
 use crate::{now_ms, DaemonError};
 
 use std::sync::Arc;
@@ -128,6 +142,17 @@ pub enum ControlRequest {
         id: ActionId,
         reply: tokio::sync::oneshot::Sender<Result<String, String>>,
     },
+
+    /// An operator asking for a cell to be moved to a named node.
+    ///
+    /// Submitted through the controller exactly as the loop's own decisions
+    /// are, as an operator's request (`DecisionEnvelope::requested_by_operator`):
+    /// it clears no model threshold, and every safety check still applies.
+    Migrate {
+        target: fabric_controller::ActionTarget,
+        destination: DbmsId,
+        reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+    },
 }
 
 /// One action the daemon could not finish, and why that matters.
@@ -174,7 +199,14 @@ pub struct ControlPlane {
     runtime: FabricRuntime,
     door: FrontDoor,
     prober: LivenessProber,
-    telemetry: Box<dyn TelemetrySource>,
+
+    /// The workload source, until [`Self::run`] hands it to the pump that
+    /// samples it beside the cycle (see the module docs).
+    telemetry: Option<Box<dyn TelemetrySource>>,
+
+    /// What that source is, for the admin surface. Kept apart from the source
+    /// because the pump, not the plane, owns it while the loop runs.
+    telemetry_source: String,
 
     store: Option<PlacementStore>,
     versions: HashMap<String, StoredPlacement>,
@@ -211,7 +243,6 @@ pub struct ControlPlane {
     draining: bool,
 
     next_probe_ms: u64,
-    next_poll_ms: u64,
 
     decisions: DecisionCounters,
     probes: BTreeMap<String, (String, u64)>,
@@ -287,7 +318,8 @@ impl ControlPlane {
             runtime,
             door: door.clone(),
             prober,
-            telemetry,
+            telemetry_source: telemetry.describe(),
+            telemetry: Some(telemetry),
             store,
             versions,
             store_state,
@@ -303,7 +335,6 @@ impl ControlPlane {
             cycles: 0,
             draining: false,
             next_probe_ms: 0,
-            next_poll_ms: 0,
             decisions: DecisionCounters::default(),
             probes: BTreeMap::new(),
             samples: BTreeMap::new(),
@@ -412,8 +443,32 @@ impl ControlPlane {
         let mut ticker = tokio::time::interval(cadence);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+        let (sampled, mut samples) = tokio::sync::mpsc::unbounded_channel();
+        let pump = pump_telemetry(
+            self.telemetry.take(),
+            Duration::from_millis(self.settings.cadence.telemetry_poll_ms),
+            sampled,
+        );
+        tokio::pin!(pump);
+
         loop {
             tokio::select! {
+                /*
+                 * The pump never finishes; polling it here is what keeps a
+                 * `/stats` sweep in flight while the cycle probes and decides.
+                 */
+                () = &mut pump => {}
+
+                /*
+                 * Evidence about load, applied as it arrives. Its stamp is the
+                 * wall time it came back at, which the cycle's own clock tick
+                 * has already reached or is about to: the probes, never having
+                 * waited for it, are no older than their cadence.
+                 */
+                Some(sample) = samples.recv() => {
+                    self.ingest(sample);
+                }
+
                 /*
                  * A report from whatever is moving the bytes is applied the
                  * moment it arrives rather than at the next cycle: it is the
@@ -452,11 +507,6 @@ impl ControlPlane {
         if now >= self.next_probe_ms {
             self.probe(now).await;
             self.next_probe_ms = now + self.settings.cadence.liveness_probe_ms;
-        }
-
-        if now >= self.next_poll_ms {
-            self.poll().await;
-            self.next_poll_ms = now + self.settings.cadence.telemetry_poll_ms;
         }
 
         if !self.draining {
@@ -506,9 +556,8 @@ impl ControlPlane {
         }
     }
 
-    async fn poll(&mut self) {
-        let sample = self.telemetry.sample().await;
-
+    /// Apply one telemetry sweep the pump finished.
+    fn ingest(&mut self, sample: Sample) {
         for (id, note) in sample.notes {
             self.samples.insert(id.0, note);
         }
@@ -766,7 +815,71 @@ impl ControlPlane {
 
                 let _ = reply.send(answer);
             }
+
+            ControlRequest::Migrate {
+                target,
+                destination,
+                reply,
+            } => {
+                let answer = self.migrate(target, destination);
+
+                self.publish_routing();
+                self.publish_status(now_ms());
+
+                let _ = reply.send(answer);
+            }
         }
+    }
+
+    /// An operator's move: `destination` takes over `target`, through the
+    /// same controller, mechanism, mover and cutover as a move the loop
+    /// decided on.
+    ///
+    /// The request is asked at the runtime's own clock, against the fleet
+    /// as the runtime sees it now -- the instant and the generation every
+    /// check measures against. Its baseline is the cell's current profile,
+    /// or, for a cell no telemetry has described, a profile of no evidence:
+    /// the outcome is still measured, against a promise of nothing.
+    fn migrate(
+        &mut self,
+        target: fabric_controller::ActionTarget,
+        destination: DbmsId,
+    ) -> Result<String, String> {
+        if self.draining {
+            return Err("fabricd is draining: it admits no new action".to_string());
+        }
+
+        let baseline = self
+            .runtime
+            .analyzer()
+            .profiles()
+            .find(|profile| {
+                profile.shard_id == target.shard_id && profile.coordinate == target.coordinate
+            })
+            .cloned()
+            .unwrap_or_else(|| {
+                WorkloadProfile::from_metrics(
+                    target.shard_id,
+                    target.coordinate,
+                    fabric_telemetry::WorkloadMetrics::default(),
+                )
+            });
+
+        let envelope = DecisionEnvelope::requested_by_operator(
+            target,
+            fabric_optimizer::OptimizationAction::Move {
+                target: destination.clone(),
+            },
+            self.runtime.clock_ms(),
+            self.runtime.fleet_view().generation(),
+        );
+
+        let id = self
+            .runtime
+            .submit(envelope, &baseline)
+            .map_err(|error| error.to_string())?;
+
+        Ok(format!("{id}: admitted, move {target} to '{}'", destination.0))
     }
 
     fn record_transfer(
@@ -1423,7 +1536,7 @@ impl ControlPlane {
             admin_listen: self.settings.admin_listen.to_string(),
             routing_generation: self.door.generation(),
             placement_generation: fleet.generation(),
-            telemetry_source: self.telemetry.describe(),
+            telemetry_source: self.telemetry_source.clone(),
             observations: self.runtime.state().len(),
             profiles: self.runtime.analyzer().len(),
             hot_cells: self.runtime.analyzer().hot_coordinates().len(),
@@ -1513,4 +1626,36 @@ fn placement_label(placement: &fabric_topology::Placement) -> String {
         placement.coordinate.y,
         placement.dbms_id.0
     )
+}
+
+/// Sample the workload source on its own cadence, beside the cycle, and hand
+/// each finished sweep to the loop.
+///
+/// Never returns. A sweep may take as long as its client lets it (the live
+/// poller's is sequential with a per-request timeout); what it can no longer
+/// do is hold a probe back, because nothing the cycle does waits on it. Ticks
+/// missed while a sweep was slow are delayed, not bunched, so rates stay
+/// differenced over real intervals. A plane already running has no source to
+/// hand over, and its pump simply never produces.
+async fn pump_telemetry(
+    source: Option<Box<dyn TelemetrySource>>,
+    every: Duration,
+    into: tokio::sync::mpsc::UnboundedSender<Sample>,
+) {
+    let Some(mut source) = source else {
+        return std::future::pending().await;
+    };
+
+    let mut ticker = tokio::time::interval(every);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        ticker.tick().await;
+
+        let sample = source.sample().await;
+
+        if into.send(sample).is_err() {
+            return std::future::pending().await;
+        }
+    }
 }

@@ -29,6 +29,16 @@ pub struct DecisionEnvelope {
     /// [`FleetView::generation`](crate::FleetView::generation) at the moment
     /// the decision was computed.
     pub topology_generation: u64,
+
+    /// An operator asked for this action on the operator port, rather than
+    /// the optimizer proposing it. An operator's request carries no model
+    /// score to clear: `validate` skips the execution threshold for it and
+    /// holds it to every other check -- staleness, the fleet it was asked
+    /// against, destination health and headroom, one action per target, the
+    /// last copy. Absent from the wire when false, so an optimizer decision
+    /// serializes exactly as it always has.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub requested_by_operator: bool,
 }
 
 impl DecisionEnvelope {
@@ -44,6 +54,34 @@ impl DecisionEnvelope {
             target,
             observed_at_ms,
             topology_generation,
+            requested_by_operator: false,
+        }
+    }
+
+    /// An operator's request for `action` on `target`, asked at
+    /// `observed_at_ms` against fleet `topology_generation`. It promises
+    /// nothing (no expected gain, no cost) and is certain of itself: a
+    /// person decided it, and its outcome is measured and reported like any
+    /// other, against a promise of zero.
+    pub fn requested_by_operator(
+        target: ActionTarget,
+        action: OptimizationAction,
+        observed_at_ms: u64,
+        topology_generation: u64,
+    ) -> Self {
+        Self {
+            decision: OptimizationDecision {
+                shard_id: target.shard_id,
+                coordinate: target.coordinate,
+                action,
+                expected_gain: 0.0,
+                estimated_cost: 0.0,
+                confidence: 1.0,
+            },
+            target,
+            observed_at_ms,
+            topology_generation,
+            requested_by_operator: true,
         }
     }
 

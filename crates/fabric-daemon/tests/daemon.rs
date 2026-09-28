@@ -649,3 +649,213 @@ async fn the_status_names_the_ports_actually_bound() {
     source.stop().await;
     destination.stop().await;
 }
+
+/// `POST /actions` on the operator port: an operator asking for a cell to
+/// move. Admitted through the same controller as the loop's own decisions,
+/// as the operator's request -- no model score to clear, every safety check
+/// kept -- and shown, refused and aborted like any other action.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_operator_can_ask_for_a_move_and_is_held_to_the_controllers_checks() {
+    let source = Fake::spawn().await;
+    let destination = Fake::spawn().await;
+
+    // No telemetry pressure: nothing the loop decides on its own.
+    let daemon = Daemon::start(settings(&source, &destination, 5_000), simulated(false))
+        .await
+        .expect("the daemon boots");
+
+    let operator = daemon.admin_addr();
+    let http = reqwest::Client::new();
+
+    until!(
+        "both instances serviceable",
+        Duration::from_secs(10),
+        admin(&http, operator, "/fleet")
+            .await
+            .as_array()
+            .is_some_and(|backends| backends
+                .iter()
+                .all(|backend| backend["availability"] == "serviceable"))
+    );
+
+    let ask = |body: &str, token: Option<&str>| {
+        let mut request = http
+            .post(format!("http://{operator}/actions"))
+            .body(body.to_string());
+        if let Some(token) = token {
+            request = request.header("x-api-key", token);
+        }
+        async move {
+            let response = request.send().await.expect("the operator port answered");
+            let status = response.status().as_u16();
+            (status, response.text().await.expect("a body"))
+        }
+    };
+
+    let move_it = format!(r#"{{"shard":{SHARD},"x":0,"y":0,"destination":"{DESTINATION}"}}"#);
+
+    // Without the token: the operator surface's own refusal.
+    assert_eq!(ask(&move_it, None).await.0, 401);
+
+    // A body that is not the request.
+    let (status, body) = ask(r#"{"shard":1,"x":0,"y":0}"#, Some(ADMIN_TOKEN)).await;
+    assert_eq!(status, 400, "{body}");
+    let (status, body) = ask(
+        &format!(r#"{{"shard":{SHARD},"x":0,"y":0,"destination":"{DESTINATION}","why":"x"}}"#),
+        Some(ADMIN_TOKEN),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("unknown field"), "{body}");
+
+    // A destination the fleet does not have: the controller's refusal.
+    let (status, body) = ask(
+        &format!(r#"{{"shard":{SHARD},"x":0,"y":0,"destination":"nowhere"}}"#),
+        Some(ADMIN_TOKEN),
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+    assert!(body.contains("nowhere"), "{body}");
+
+    // Admitted, as the operator's move.
+    let (status, body) = ask(&move_it, Some(ADMIN_TOKEN)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body,
+        format!("action-1: admitted, move shard {SHARD} (0,0) to '{DESTINATION}'\n")
+    );
+
+    let actions = admin(&http, operator, "/actions").await;
+    let action = &actions[0];
+    assert_eq!(action["action"], "move");
+    assert_eq!(action["source"], SOURCE);
+    assert_eq!(action["destination"], DESTINATION);
+
+    // One action per target, whoever asks.
+    let (status, body) = ask(&move_it, Some(ADMIN_TOKEN)).await;
+    assert_eq!(status, 409, "{body}");
+    assert!(body.contains("action-1"), "{body}");
+
+    // And it is torn down like any other.
+    let aborted = http
+        .post(format!("http://{operator}/actions/1/abort"))
+        .header("x-api-key", ADMIN_TOKEN)
+        .send()
+        .await
+        .expect("the operator port answered");
+    assert_eq!(aborted.status(), 200);
+
+    daemon.shutdown().await;
+    source.stop().await;
+    destination.stop().await;
+}
+
+// ── a slow /stats is not a lost node ────────────────────────────────────
+
+/// A fleet whose every `/stats` read takes longer than the silence budget,
+/// stamped the way the real poller stamps it: with the wall time the answer
+/// arrived, not the time it was asked.
+///
+/// Telemetry is evidence about load and never about liveness, so however
+/// slow it is, instances that answer every `GET /` probe must stay healthy
+/// and routable.
+struct SlowStats {
+    delay: Duration,
+}
+
+impl TelemetrySource for SlowStats {
+    fn describe(&self) -> String {
+        format!("a /stats that answers after {} ms", self.delay.as_millis())
+    }
+
+    fn sample(
+        &mut self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Sample> + '_>> {
+        Box::pin(async move {
+            tokio::time::sleep(self.delay).await;
+
+            let mut sample = Sample::default();
+            let FabricMessage::Telemetry(mut batch) = duress(0) else {
+                unreachable!("duress is a telemetry batch");
+            };
+
+            batch.timestamp_ms = now_ms();
+            batch.samples[0].operations_per_second = 10.0;
+            batch.samples[0].cpu_utilization = 0.1;
+            batch.samples[0].memory_utilization = 0.1;
+            batch.samples[0].queue_depth = 0;
+            batch.samples[0].read_latency_us = 100.0;
+            batch.samples[0].write_latency_us = 100.0;
+            sample.messages.push(FabricMessage::Telemetry(batch));
+
+            sample
+        })
+    }
+}
+
+/// The node-loss bug: a cycle probed (heartbeats stamped at the cycle's
+/// start), then waited on a sequential `/stats` sweep whose samples moved the
+/// runtime's clock to their post-poll wall time, then judged liveness at that
+/// clock -- so one slow `/stats` read made every live node look silent past
+/// its budget, and blocked every probe while it lasted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slow_stats_read_does_not_lose_nodes_that_answer_their_probes() {
+    let source = Fake::spawn().await;
+    let destination = Fake::spawn().await;
+
+    let delay = Duration::from_millis(1_500);
+    let factory: TelemetryFactory =
+        Box::new(move || Ok(Box::new(SlowStats { delay }) as Box<dyn TelemetrySource>));
+
+    let daemon = Daemon::start(settings(&source, &destination, 1_000), factory)
+        .await
+        .expect("the daemon boots");
+
+    let operator = daemon.admin_addr();
+    let data = daemon.data_addr();
+    let http = reqwest::Client::new();
+
+    // Long enough for three slow sweeps to land.
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    let mut reads = 0;
+    let mut statuses = 0;
+
+    while std::time::Instant::now() < until {
+        let answered = read_posts(&http, data).await;
+        assert_eq!(
+            answered.status(),
+            200,
+            "read {reads}: the front door refused a live node while /stats was slow"
+        );
+        reads += 1;
+
+        let status = admin(&http, operator, "/status").await;
+        for backend in status["backends"].as_array().expect("backends") {
+            assert_eq!(
+                backend["health"], "healthy",
+                "status {statuses}: a node answering its probes was judged {}: {backend}",
+                backend["health"]
+            );
+            assert_eq!(backend["availability"], "serviceable", "{backend}");
+        }
+        statuses += 1;
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // And the probes kept their cadence: the slow sweep is not on their path.
+    let status = admin(&http, operator, "/status").await;
+    let clock = status["snapshot_at_ms"].as_u64().unwrap();
+    for backend in status["backends"].as_array().unwrap() {
+        let probed = backend["last_probe_at_ms"].as_u64().expect("probed");
+        assert!(
+            clock.saturating_sub(probed) < 1_000,
+            "the last probe is {} ms old: probes stalled behind /stats: {backend}",
+            clock.saturating_sub(probed)
+        );
+    }
+
+    daemon.shutdown().await;
+    source.stop().await;
+    destination.stop().await;
+}

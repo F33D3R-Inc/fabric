@@ -33,6 +33,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use fabric_controller::ActionId;
+use fabric_core::{Coordinate, DbmsId};
 use serde::Deserialize;
 
 use crate::control::ControlRequest;
@@ -83,7 +84,7 @@ pub fn router(state: AdminState) -> Router {
         .route("/fleet", get(fleet))
         .route("/placements", get(placements))
         .route("/routing", get(routing))
-        .route("/actions", get(actions))
+        .route("/actions", get(actions).post(migrate))
         .route("/actions/history", get(history))
         .route("/actions/{id}/transfer", post(transfer))
         .route("/actions/{id}/abort", post(abort))
@@ -183,6 +184,44 @@ async fn abort(
 
     ask(&state, |reply| ControlRequest::Abort {
         id: ActionId(id),
+        reply,
+    })
+    .await
+}
+
+/// `POST /actions`: an operator asking for a cell to move.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MigrateRequest {
+    pub shard: u64,
+    pub x: u8,
+    pub y: u8,
+    pub destination: String,
+}
+
+async fn migrate(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Some(refusal) = refuse(&state, &headers) {
+        return refusal;
+    }
+
+    let request: MigrateRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+
+        Err(error) => {
+            return (StatusCode::BAD_REQUEST, format!("fabricd: {error}\n")).into_response();
+        }
+    };
+
+    ask(&state, |reply| ControlRequest::Migrate {
+        target: fabric_controller::ActionTarget::new(
+            request.shard,
+            Coordinate::new(request.x, request.y),
+        ),
+        destination: DbmsId::new(request.destination),
         reply,
     })
     .await

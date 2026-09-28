@@ -166,8 +166,9 @@ impl FabricController {
          * with a different opinion of its own output must not be able to raise
          * its own execution privileges by changing that method.
          */
-        if decision.confidence < self.policy.min_confidence
-            || decision.score() <= 0.0
+        if !envelope.requested_by_operator
+            && (decision.confidence < self.policy.min_confidence
+                || decision.score() <= 0.0)
         {
             return Err(ValidationError::BelowExecutionThreshold {
                 score: decision.score(),
@@ -1418,5 +1419,121 @@ mod tests {
 
         // The interlock is released, so the target can be tried again.
         assert_eq!(controller.actions().active_len(), 0);
+    }
+
+    /// An operator's move carries no model score, and is admitted anyway:
+    /// the execution threshold is the optimizer's bar, not the operator's.
+    #[test]
+    fn an_operator_request_is_not_held_to_the_models_threshold() {
+        let (topology, fleet) = world();
+        let controller = FabricController::default();
+        let view = ControlPlaneView::new(&topology, &fleet, 1_000);
+
+        let requested = DecisionEnvelope::requested_by_operator(
+            ActionTarget::new(7, Coordinate::new(3, 4)),
+            OptimizationAction::Move {
+                target: DbmsId::new("db-b"),
+            },
+            1_000,
+            1,
+        );
+
+        assert_eq!(requested.decision.score(), 0.0);
+        assert!(controller.validate(&requested, &view).is_ok());
+
+        // The same zero-score decision from the optimizer is refused.
+        let mut proposed = requested.clone();
+        proposed.requested_by_operator = false;
+
+        assert!(matches!(
+            controller.validate(&proposed, &view).unwrap_err(),
+            ValidationError::BelowExecutionThreshold { .. }
+        ));
+    }
+
+    /// Everything but the threshold still applies to an operator: an
+    /// unhealthy destination, a superseded fleet and a stale request are
+    /// refused exactly as the optimizer's would be.
+    #[test]
+    fn an_operator_request_is_held_to_every_safety_check() {
+        let (topology, mut fleet) = world();
+
+        fleet.insert(
+            NodeStatus::new(
+                DbmsId::new("db-b"),
+                "us-west",
+                NodeCondition::Degraded,
+                10,
+            )
+            .with_load(1, 0.2, 0.2),
+        );
+
+        let controller = FabricController::default();
+        let view = ControlPlaneView::new(&topology, &fleet, 1_000);
+        let target = ActionTarget::new(7, Coordinate::new(3, 4));
+        let to_b = OptimizationAction::Move {
+            target: DbmsId::new("db-b"),
+        };
+
+        assert!(matches!(
+            controller
+                .validate(
+                    &DecisionEnvelope::requested_by_operator(target, to_b.clone(), 1_000, 1),
+                    &view
+                )
+                .unwrap_err(),
+            ValidationError::DestinationUnhealthy { .. }
+        ));
+
+        assert!(matches!(
+            controller
+                .validate(
+                    &DecisionEnvelope::requested_by_operator(target, to_b.clone(), 1_000, 0),
+                    &view
+                )
+                .unwrap_err(),
+            ValidationError::TopologySuperseded { .. }
+        ));
+
+        let later = ControlPlaneView::new(&topology, &fleet, 100_000);
+        assert!(matches!(
+            controller
+                .validate(
+                    &DecisionEnvelope::requested_by_operator(target, to_b, 1_000, 1),
+                    &later
+                )
+                .unwrap_err(),
+            ValidationError::StaleDecision { .. }
+        ));
+    }
+
+    /// Absent from the wire when false: an optimizer decision serializes as
+    /// it always has, and an old envelope still reads.
+    #[test]
+    fn an_optimizer_envelope_serializes_as_before() {
+        let proposed = envelope(
+            OptimizationAction::Move {
+                target: DbmsId::new("db-b"),
+            },
+            1_000,
+        );
+        let json = serde_json::to_string(&proposed).unwrap();
+
+        assert!(!json.contains("requested_by_operator"));
+
+        let read: DecisionEnvelope = serde_json::from_str(&json).unwrap();
+        assert!(!read.requested_by_operator);
+
+        let requested = DecisionEnvelope::requested_by_operator(
+            ActionTarget::new(7, Coordinate::new(3, 4)),
+            OptimizationAction::Isolate,
+            1_000,
+            1,
+        );
+        assert!(
+            serde_json::to_string(&requested)
+                .unwrap()
+                .contains("\"requested_by_operator\":true")
+        );
     }
 }

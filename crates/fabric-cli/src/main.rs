@@ -1,14 +1,14 @@
 //! `fabric` -- native operator CLI for Facet Fabric.
 //!
-//! Fabric is early: there is no persistent daemon or live-state service yet, so
-//! this CLI does not pretend to manage or query a running cluster. Instead it
-//! drives the *real* in-process analysis pipeline (`fabric-runtime`) over a
-//! session of protocol messages and reports what the actual Fabric crates
-//! compute. Every command is backed by a concrete crate capability; commands
+//! Two kinds of command. The analysis commands drive the *real* in-process
+//! pipeline (`fabric-runtime`) over a session of protocol messages and report
+//! what the actual Fabric crates compute. `fabric daemon ...` asks a running
+//! fabricd, over its operator port (`daemon.rs`). Every command is backed by a concrete crate capability; commands
 //! that would require capability Fabric does not have yet are deliberately
 //! absent (see the crate README / handoff notes).
 
 mod args;
+mod daemon;
 mod render;
 mod session;
 
@@ -42,6 +42,8 @@ COMMANDS:
     predict     ML hotspot probability and anomaly score per profile
     validate    Check that ingested coordinates fall within the grid
     nodes       Fleet inventory: registered nodes and their liveness
+    daemon      A running fabricd, over its operator port
+                (status, placements, migrate; see 'fabric daemon --help')
 
 OPTIONS:
     -i, --input <file>   JSON array of FabricMessage values to replay ('-' = stdin)
@@ -54,9 +56,10 @@ OPTIONS:
     -V, --version        Show version
 
 NOTES:
-    Fabric has no live daemon yet, so this tool runs the real analysis pipeline
-    over a captured/authored protocol-message session. With no --input the
-    runtime is empty and each command reports the empty state.";
+    Every command but 'daemon' runs the real analysis pipeline over a
+    captured/authored protocol-message session. With no --input the runtime
+    is empty and each command reports the empty state. 'daemon' asks a
+    running fabricd instead.";
 
 fn subcommand_help(sub: Subcommand) -> String {
     let purpose = match sub {
@@ -88,6 +91,16 @@ fn main() -> ExitCode {
             ExitCode::from(EXIT_OK)
         }
         Ok(Command::Run { subcommand, opts }) => run(subcommand, opts),
+        Ok(Command::Daemon(command)) => {
+            let outcome = daemon::run(
+                &command,
+                std::env::var("FABRIC_ADMIN_URL").ok(),
+                std::env::var("FABRIC_ADMIN_TOKEN").ok(),
+            );
+            print!("{}", outcome.stdout);
+            eprint!("{}", outcome.stderr);
+            ExitCode::from(outcome.code)
+        }
         Err(err) => {
             eprintln!("error: {err}");
             eprintln!("try 'fabric --help'");

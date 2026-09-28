@@ -43,7 +43,14 @@ pub enum FacetqlError {
     NotFound(String),
 
     /// Any other non-success status, with FacetQL's own words.
-    Status { status: u16, body: String },
+    Status {
+        status: u16,
+        body: String,
+        /// The engine's `Retry-After`, in seconds, when it gave one: how
+        /// long a 429 (its rate limiter) or a 503 asks the caller to wait
+        /// before trying again. See `client::retry_after_secs`.
+        retry_after_secs: Option<u64>,
+    },
 
     /// The response was not the JSON this contract says it is. A decode
     /// failure is a contract mismatch, not a data problem — it is worth
@@ -89,12 +96,26 @@ impl std::fmt::Display for FacetqlError {
             }
             Self::Conflict(body) => write!(f, "facetql conflict (409): {body}"),
             Self::NotFound(body) => write!(f, "facetql not found (404): {body}"),
-            Self::Status { status, body } => {
+            Self::Status { status, body, .. } => {
                 write!(f, "facetql returned {status}: {body}")
             }
             Self::Decode { context, message } => {
                 write!(f, "facetql response for {context} did not decode: {message}")
             }
+        }
+    }
+}
+
+impl FacetqlError {
+    /// How long the engine asked to be left alone, if it said
+    /// (`Retry-After` on a status it failed with).
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::Status {
+                retry_after_secs: Some(secs),
+                ..
+            } => Some(std::time::Duration::from_secs(*secs)),
+            _ => None,
         }
     }
 }
@@ -125,7 +146,8 @@ mod tests {
         assert!(
             FacetqlError::Status {
                 status: 500,
-                body: "disk".into()
+                body: "disk".into(),
+                retry_after_secs: None,
             }
             .implies_unhealthy()
         );

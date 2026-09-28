@@ -177,6 +177,7 @@ dependencies = [
  "fabric-topology",
  "fabric-workload",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

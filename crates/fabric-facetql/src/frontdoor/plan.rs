@@ -323,9 +323,18 @@ pub fn plan(
             ),
         },
 
+        /*
+         * The aggregates name their kind exactly as a count does, and a kind
+         * is one routing key: a kind-scoped aggregate is answered whole by
+         * that key's holder. A kind-less one selects across the namespace and
+         * has no merge a proxy may perform (an `avg` of two averages is not
+         * the average), so it is a spanning request like the rest.
+         */
         (&Method::POST, ["nodes", "query"])
         | (&Method::POST, ["nodes", "count"])
-        | (&Method::POST, ["nodes", "count_by"]) => {
+        | (&Method::POST, ["nodes", "count_by"])
+        | (&Method::POST, ["nodes", "aggregate"])
+        | (&Method::POST, ["nodes", "aggregate_by"]) => {
             let context = path.to_string();
 
             let parsed = match json(body, &context) {
@@ -470,6 +479,19 @@ pub fn plan(
         }
 
         // ── per-instance state ──────────────────────────────────────────
+        /*
+         * The change log is one engine's: `?after=` is a position in that
+         * engine's log, so two backends' pages cannot be merged into one
+         * resumable sequence. Spanning, like a kind-less listing.
+         */
+        (&Method::GET, ["changes"]) => spanning(
+            keyspace,
+            read(),
+            "GET /changes",
+            "it pages one engine's change log by that engine's own position, \
+             so two backends' logs cannot be merged into one resumable sequence",
+        ),
+
         (&Method::GET, ["stats"]) => spanning(
             keyspace,
             read(),
@@ -800,6 +822,33 @@ mod tests {
         );
     }
 
+    /// An aggregate is a read of its kind, routed by it as a count is.
+    #[test]
+    fn a_kind_scoped_aggregate_routes_by_its_kind() {
+        assert_eq!(
+            keys(&planned(
+                Method::POST,
+                "/nodes/aggregate",
+                None,
+                r#"{"kind":"User","func":"max","field":"id"}"#
+            )),
+            vec![key(2)]
+        );
+        assert_eq!(
+            keys(&planned(
+                Method::POST,
+                "/nodes/aggregate_by",
+                None,
+                r#"{"kind":"Post","group_by":"author","values":["a"],"func":"sum","field":"n"}"#
+            )),
+            vec![key(1)]
+        );
+        match planned(Method::POST, "/nodes/aggregate", None, "not json") {
+            Plan::Refuse(Refusal::MalformedBody { .. }) => {}
+            other => panic!("a body that is not the contract: {other:?}"),
+        }
+    }
+
     /// The invariant the whole front door exists to preserve: a batch that
     /// does not fit on one engine is refused, never split.
     #[test]
@@ -867,6 +916,9 @@ mod tests {
             (Method::GET, "/stats", ""),
             (Method::POST, "/admin/users", r#"{"owner":"a"}"#),
             (Method::POST, "/nodes/query", r#"{"limit":10}"#),
+            (Method::POST, "/nodes/aggregate", r#"{"func":"count"}"#),
+            (Method::POST, "/nodes/aggregate_by", r#"{"group_by":"author","func":"count"}"#),
+            (Method::GET, "/changes", ""),
         ];
 
         for (method, path, body) in cases {

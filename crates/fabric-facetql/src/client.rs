@@ -267,6 +267,7 @@ impl FacetqlClient {
             return Ok(response);
         }
 
+        let retry_after = retry_after_header(response.headers());
         let body = response.text().await.unwrap_or_default();
 
         Err(match status.as_u16() {
@@ -274,7 +275,11 @@ impl FacetqlClient {
                 status: status.as_u16(),
                 body,
             },
-            status => FacetqlError::Status { status, body },
+            status => FacetqlError::Status {
+                status,
+                body,
+                retry_after_secs: retry_after,
+            },
         })
     }
 
@@ -362,6 +367,7 @@ impl FacetqlClient {
         })?;
 
         let status = response.status();
+        let retry_after = retry_after_header(response.headers());
         let body = response.text().await.unwrap_or_default();
 
         if status.is_success() {
@@ -376,9 +382,33 @@ impl FacetqlClient {
             404 => FacetqlError::NotFound(body),
             409 => FacetqlError::Conflict(body),
             412 => FacetqlError::PreconditionFailed(body),
-            status => FacetqlError::Status { status, body },
+            status => FacetqlError::Status {
+                status,
+                body,
+                retry_after_secs: retry_after,
+            },
         })
     }
+}
+
+fn retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    retry_after_secs(
+        headers
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+    )
+}
+
+/// A `Retry-After` header's delay-seconds (RFC 9110 §10.2.3: `1*DIGIT`),
+/// whitespace around it ignored. The HTTP-date form, a signed or fractional
+/// number, or one past `u64` is no delay this client can honour, and reads as
+/// none. FacetQL answers its rate limiter's 429 with delay-seconds.
+pub fn retry_after_secs(value: Option<&str>) -> Option<u64> {
+    let value = value?.trim();
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    value.parse().ok()
 }
 
 fn decode<T: serde::de::DeserializeOwned>(body: &str, context: &str) -> Result<T, FacetqlError> {
@@ -436,5 +466,20 @@ mod tests {
             serde_json::to_string(&request).unwrap(),
             r#"{"kind":"__fabric_placement","limit":500}"#
         );
+    }
+
+    #[test]
+    fn retry_after_is_read_as_delay_seconds_only() {
+        assert_eq!(retry_after_secs(Some("3")), Some(3));
+        assert_eq!(retry_after_secs(Some(" 7 ")), Some(7));
+        assert_eq!(retry_after_secs(Some("0")), Some(0));
+        assert_eq!(retry_after_secs(Some("18446744073709551615")), Some(u64::MAX));
+        assert_eq!(retry_after_secs(Some("18446744073709551616")), None);
+        assert_eq!(retry_after_secs(Some("+3")), None);
+        assert_eq!(retry_after_secs(Some("-1")), None);
+        assert_eq!(retry_after_secs(Some("1.5")), None);
+        assert_eq!(retry_after_secs(Some("Wed, 21 Oct 2015 07:28:00 GMT")), None);
+        assert_eq!(retry_after_secs(Some("")), None);
+        assert_eq!(retry_after_secs(None), None);
     }
 }
